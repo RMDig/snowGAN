@@ -63,13 +63,16 @@ def main(argv=None):
     ap.add_argument("--numpy-real", action="store_true",
                     help="feed the real images as a NumPy array (like next_batch's np.stack) "
                          "instead of a tf.Tensor -- reproduces the real disc loop's input")
+    ap.add_argument("--train-gen", action="store_true",
+                    help="also run a full generator training step (tracked gen forward -> disc "
+                         "-> gen backprop -> apply) each iteration, as the real train_step does")
     ap.add_argument("--steps", type=int, default=400)
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--resolution", type=int, default=1024)
     ap.add_argument("--report", type=int, default=50)
     args = ap.parse_args(argv)
 
-    use_gen = True if args.full else (args.gen if args.gen is not None else False)
+    use_gen = True if (args.full or args.train_gen) else (args.gen if args.gen is not None else False)
     use_aug = True if args.full else (args.augment if args.augment is not None else False)
 
     disc = Discriminator(_disc_config(args.sn, args.resolution))
@@ -100,6 +103,21 @@ def main(argv=None):
         grads = tape.gradient(loss, disc.model.trainable_variables)
         disc.optimizer.apply_gradients(zip(grads, disc.model.trainable_variables))
         del tape, grads, out_real, out_fake, loss, real, fake
+
+        # Generator training step: gen forward TRACKED by the tape, through the
+        # disc, then backprop through the whole generator + apply. The real
+        # train_step does this every batch; no prior bench did (the disc bench
+        # only ran the disc update with stop_gradient'd fakes).
+        if args.train_gen and gen is not None:
+            gnoise = tf.random.normal([args.batch, latent])
+            with tf.GradientTape() as gtape:
+                synth = gen(gnoise, training=True)
+                sout = disc.model(synth, training=True)
+                gloss = -tf.reduce_mean(sout)
+            gvars = gen.model.trainable_variables
+            ggrads = gtape.gradient(gloss, gvars)
+            gen.optimizer.apply_gradients(zip(ggrads, gvars))
+            del gtape, ggrads, gvars, synth, sout, gloss, gnoise
 
         if step % args.report == 0:
             mi = _mallinfo2() or {}
