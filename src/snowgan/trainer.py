@@ -62,7 +62,8 @@ from snowgan.log import save_history, load_history
 from snowgan.data.dataset import DataManager
 from snowgan.utils import compute_fade_alpha
 from snowgan.augment import augment as diff_augment
- 
+from snowgan.memtrace import maybe_create_memtrace
+
 class Trainer:
 
     def __init__(self, generator, discriminator):
@@ -138,6 +139,10 @@ class Trainer:
             print("Discriminator saved weights not found, new model initialized")
 
         self.save_dir = self.gen.config.save_dir # Save dictory for the model and it's generated images
+
+        # Diagnostic native-CPU-RAM attributor. No-op unless SNOWGAN_MEMTRACE
+        # is set; writes a JSONL trace under save_dir for post-run analysis.
+        self._memtrace = maybe_create_memtrace(self.save_dir)
 
         # Persistent loss-history figure, created lazily in plot_history and
         # reused across calls. Creating a fresh figure every call leaks CPU RAM
@@ -542,7 +547,11 @@ class Trainer:
 
                 print(f"Training on batch {batch}...")
 
-                self.train_step(x) # Train on batch of images
+                # On snapshot batches, ask train_step to lay down per-substep
+                # RSS waypoints (disc loop / gen loop / post-step) so the native
+                # snapshot below can attribute growth to a phase of the step.
+                _mt_due = self._memtrace is not None and self._memtrace.due(batch)
+                self.train_step(x, trace=_mt_due) # Train on batch of images
                 # Drop the input batch reference before printing RSS so the
                 # number reflects steady-state memory between batches.
                 del x
@@ -553,6 +562,10 @@ class Trainer:
                     gc.collect()
                 rss_mb = _process_rss_mb()
                 print(f'Epoch {epoch} | Batch {batch} | Generator loss: {round(float(self.loss["gen"][-1]), 3)} | Discrimintator loss: {round(float(self.loss["disc"][-1]), 3)} | RSS: {rss_mb:.0f} MiB')
+                # Native-heap snapshot (mallinfo2 arenas, mmap count, leak-rate
+                # fit). Same cadence as the substep marks so they line up.
+                if _mt_due:
+                    self._memtrace.tick(batch)
 
 
                 # Plot training curves on a fixed batch cadence to avoid I/O storm
@@ -628,8 +641,13 @@ class Trainer:
                 finally:
                     self._restore_generator_weights(backup)
 
+        # Flush the diagnostic trace on graceful exit. (An OOM-kill won't reach
+        # here, but the JSONL is line-buffered so no records are lost either way.)
+        if self._memtrace is not None:
+            self._memtrace.close()
 
-    def train_step(self, images, disc_steps = None, gen_steps = None):
+
+    def train_step(self, images, disc_steps = None, gen_steps = None, trace = False):
         """
         This function trains the snowGAN on the passed in images, with variables 
         training length of the discriminator and generator. This function implements
@@ -660,6 +678,8 @@ class Trainer:
         # so the recorded train_step datapoint reflects the mean across all
         # inner updates rather than only the final iteration's value
         # (UPGRADES #33). Empty-list guard handles training_steps=0.
+        if trace and self._memtrace is not None:
+            self._memtrace.note("disc_loop")
         disc_losses: list[float] = []
         real_scores = None
         for _ in range(self.disc.config.training_steps):
@@ -732,6 +752,8 @@ class Trainer:
 
         # Train the generator M times. Same accumulation pattern as the
         # discriminator loop above (UPGRADES #33).
+        if trace and self._memtrace is not None:
+            self._memtrace.note("gen_loop")
         gen_losses: list[float] = []
         for _ in range(self.gen.config.training_steps):
             # Generate random noise to pass into the generator
@@ -765,6 +787,8 @@ class Trainer:
             # Drop per-iter tensors so refs don't pile up across the inner loop.
             del tape, gen_gradients, var_list, synthetic_images, synthetic_output, gen_loss, noise
 
+        if trace and self._memtrace is not None:
+            self._memtrace.note("poststep")
         # Record mean loss across the inner update loops. Using means makes
         # the curve faithful to all training_steps iterations and stabilizes
         # the EMA in _update_adaptive_steps below.
@@ -785,6 +809,8 @@ class Trainer:
         self._update_adaptive_steps(mean_disc_loss, mean_gen_loss)
         if real_scores is not None:
             self._update_ada(real_scores)
+        if trace and self._memtrace is not None:
+            self._memtrace.note("end")
 
     def _use_fade(self):
         return getattr(self.gen.config, 'fade', False) and getattr(self.gen, 'fade_endpoints', None) is not None and not self.fade_complete
