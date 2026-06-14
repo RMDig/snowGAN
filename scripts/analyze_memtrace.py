@@ -6,7 +6,7 @@
 Reports the overall RSS leak rate, regresses each native counter to say WHERE
 the bytes go (live arena vs mmap vs fragmentation), averages the per-substep
 attribution, and prints a verdict against the four signatures documented in
-src/snowgan/memtrace.py. Pure stdlib — runs anywhere, no TF import.
+src/snowgan/memtrace.py. Pure stdlib -- runs anywhere, no TF import.
 """
 import argparse
 import json
@@ -74,10 +74,10 @@ def main(argv=None):
 
     rss0, rss1 = rows[0]["rss_mib"], rows[-1]["rss_mib"]
     rss_slope, rss_r2 = _slope_per_batch(rows, lambda r: r.get("rss_mib"))
-    print(f"RSS: {rss0:.0f} -> {rss1:.0f} MiB  (Δ{rss1 - rss0:+.0f})")
+    print(f"RSS: {rss0:.0f} -> {rss1:.0f} MiB  (delta {rss1 - rss0:+.0f})")
     if rss_slope is not None:
         per_h = rss_slope * (b1 - b0) / span_h if span_h > 0 else float("nan")
-        print(f"  leak rate: {rss_slope:+.4f} MiB/batch  (~{per_h:+.0f} MiB/h)  R²={rss_r2:.3f}\n")
+        print(f"  leak rate: {rss_slope:+.4f} MiB/batch  (~{per_h:+.0f} MiB/h)  R^2={rss_r2:.3f}\n")
 
     # Which native counter tracks the RSS climb?
     counters = {
@@ -89,14 +89,14 @@ def main(argv=None):
         "smaps anon           ": lambda r: (r.get("smaps") or {}).get("anon_mib"),
         "tracemalloc (python) ": lambda r: r.get("tracemalloc_cur_mib"),
     }
-    print("Native counters (slope per batch, R²):")
+    print("Native counters (slope per batch, R^2):")
     slopes = {}
     for name, get in counters.items():
         s, r2 = _slope_per_batch(rows, get)
         slopes[name.strip()] = s
         if s is not None:
             unit = "VMAs" if "maps" in name else "MiB"
-            print(f"  {name}: {s:+.4f} {unit}/batch  R²={r2 if r2 is None else round(r2, 3)}")
+            print(f"  {name}: {s:+.4f} {unit}/batch  R^2={r2 if r2 is None else round(r2, 3)}")
     print()
 
     # Per-substep attribution (disc loop / gen loop / post-step).
@@ -124,19 +124,19 @@ def main(argv=None):
     tmal = slopes.get("tracemalloc (python)")
     print("Verdict:")
     if abs(rss_s) < 0.05:
-        print("  RSS is essentially flat — no meaningful leak in this window.")
+        print("  RSS is essentially flat -- no meaningful leak in this window.")
     elif tmal is not None and tmal > 0.5 * rss_s and rss_s > 0:
-        print("  PYTHON leak — tracemalloc tracks RSS. Check top_growers in the JSONL.")
+        print("  PYTHON leak -- tracemalloc tracks RSS. Check top_growers in the JSONL.")
     elif hblk > 0.3 * rss_s or maps > 0.5:
-        print("  MMAP growth — unbounded mmap regions (hblkhd / maps_count rising).")
+        print("  MMAP growth -- unbounded mmap regions (hblkhd / maps_count rising).")
         print("  Signature of the cuDNN/cuda JIT module-cache-per-step (Blackwell) theory.")
     elif uord > 0.5 * rss_s:
-        print("  NATIVE arena leak — live in-use bytes (uordblks) climb with RSS.")
+        print("  NATIVE arena leak -- live in-use bytes (uordblks) climb with RSS.")
         print("  malloc_trim won't help (bytes are live). See substep attribution above.")
     elif ford > 0.5 * rss_s:
-        print("  FRAGMENTATION — free-in-arena (fordblks) grows; malloc_trim should reclaim.")
+        print("  FRAGMENTATION -- free-in-arena (fordblks) grows; malloc_trim should reclaim.")
     else:
-        print("  RSS climbs but no single counter dominates — inspect the JSONL directly.")
+        print("  RSS climbs but no single counter dominates -- inspect the JSONL directly.")
     return 0
 
 
