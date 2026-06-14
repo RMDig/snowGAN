@@ -690,13 +690,18 @@ class Trainer:
             self._memtrace.note("disc_loop")
         disc_losses: list[float] = []
         real_scores = None
-        for _ in range(self.disc.config.training_steps):
+        for _disc_i in range(self.disc.config.training_steps):
+            # Finer uord marks on the FIRST disc iteration only (avoids 3x
+            # overwrite); bisects which sub-op of the disc loop leaks.
+            _mt0 = self._memtrace if (trace and self._memtrace is not None and _disc_i == 0) else None
             # Generate synthetic images outside the tape — no need to track generator ops for disc training
             synthetic_images = tf.stop_gradient(self._generate_with_fade(noise, training=True))
+            if _mt0: _mt0.note("d_synth")
 
             # Apply augmentation outside the tape to avoid storing intermediate tensors in memory
             disc_real = diff_augment(images, p=aug_p) if self.use_augment else images
             disc_fake = diff_augment(synthetic_images, p=aug_p) if self.use_augment else synthetic_images
+            if _mt0: _mt0.note("d_augment")
 
             # Main discriminator tape — separate from lowres to reduce peak VRAM
             with tf.GradientTape() as tape:
@@ -721,11 +726,14 @@ class Trainer:
                 # Calculate EMD/loss for the discriminators outputs
                 disc_loss = self.disc.get_loss(output, synthetic_output, gp, lambda_gp)
 
+            if _mt0: _mt0.note("d_forward")
             # Backpropogate main discriminator
             disc_gradients = tape.gradient(disc_loss, self.disc.model.trainable_variables)
+            if _mt0: _mt0.note("d_grad")
             if self.grad_clip_norm > 0:
                 disc_gradients, _ = tf.clip_by_global_norm(disc_gradients, self.grad_clip_norm)
             self.disc.optimizer.apply_gradients(zip(disc_gradients, self.disc.model.trainable_variables))
+            if _mt0: _mt0.note("d_apply")
 
             # Free main disc tape activations before lowres pass
             del tape, disc_gradients
