@@ -214,19 +214,25 @@ class MemTrace:
         return batch % self.interval == 0
 
     def note(self, label):
-        """Record an RSS waypoint inside train_step. Cheap; only called on
-        due batches (the train loop passes trace=True). Consecutive deltas are
-        emitted by the next tick()."""
-        self._marks.append((label, _rss_mib()))
+        """Record an RSS + uordblks waypoint. Cheap; only called on due batches
+        (the train loop passes trace=True). uordblks (glibc live arena) is the
+        RELIABLE per-phase counter — RSS lags the actual malloc, so RSS substep
+        deltas misattribute. Consecutive deltas are emitted by the next tick()."""
+        mi = _mallinfo2() or {}
+        self._marks.append((label, _rss_mib(), mi.get("uordblks_mib")))
 
     def _drain_substeps(self):
         marks, self._marks = self._marks, []
         if len(marks) < 2:
             return None
         out = {}
-        for (la, ra), (_, rb) in zip(marks, marks[1:]):
+        for (la, ra, ua), (_, rb, ub) in zip(marks, marks[1:]):
             out[f"{la}_mib"] = rb - ra
+            if ua is not None and ub is not None:
+                out[f"{la}_uord_mib"] = ub - ua  # reliable: live-arena delta for this phase
         out["total_mib"] = marks[-1][1] - marks[0][1]
+        if marks[0][2] is not None and marks[-1][2] is not None:
+            out["total_uord_mib"] = marks[-1][2] - marks[0][2]
         return out
 
     # -- periodic snapshot ---------------------------------------------------

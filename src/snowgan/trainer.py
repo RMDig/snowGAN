@@ -522,6 +522,13 @@ class Trainer:
 
             trainable_data = True
             while trainable_data:
+                # Compute the memtrace cadence up front so the data load gets
+                # bracketed too: uord marks span every phase of the real loop
+                # (dataload -> train phases -> plot), and the reliable live-arena
+                # delta per phase tells us which one leaks.
+                _mt_due = self._memtrace is not None and self._memtrace.due(batch)
+                if _mt_due:
+                    self._memtrace.note("dataload")
                 # Load a new batch of subjects via the modality-aware
                 # dispatcher. config.modality determines whether this returns
                 # depth-1 single-modality samples or depth-2 merged stacks.
@@ -547,10 +554,9 @@ class Trainer:
 
                 print(f"Training on batch {batch}...")
 
-                # On snapshot batches, ask train_step to lay down per-substep
-                # RSS waypoints (disc loop / gen loop / post-step) so the native
-                # snapshot below can attribute growth to a phase of the step.
-                _mt_due = self._memtrace is not None and self._memtrace.due(batch)
+                # train_step lays disc_loop / gen_loop / poststep / end marks.
+                if _mt_due:
+                    self._memtrace.note("trainstep")
                 self.train_step(x, trace=_mt_due) # Train on batch of images
                 # Drop the input batch reference before printing RSS so the
                 # number reflects steady-state memory between batches.
@@ -562,15 +568,17 @@ class Trainer:
                     gc.collect()
                 rss_mb = _process_rss_mb()
                 print(f'Epoch {epoch} | Batch {batch} | Generator loss: {round(float(self.loss["gen"][-1]), 3)} | Discrimintator loss: {round(float(self.loss["disc"][-1]), 3)} | RSS: {rss_mb:.0f} MiB')
-                # Native-heap snapshot (mallinfo2 arenas, mmap count, leak-rate
-                # fit). Same cadence as the substep marks so they line up.
-                if _mt_due:
-                    self._memtrace.tick(batch)
 
 
                 # Plot training curves on a fixed batch cadence to avoid I/O storm
                 if batch % 10 == 0:
                     self.plot_history()
+                # Native-heap snapshot taken AFTER plot_history so its allocation
+                # is captured in this tick. Mark the plot phase, then drain all
+                # phase marks (dataload / train phases / plot) into the snapshot.
+                if _mt_due:
+                    self._memtrace.note("plot")
+                    self._memtrace.tick(batch)
 
                 # FID-based best model checkpointing
                 if self.fid_interval > 0 and self.global_step % self.fid_interval == 0:

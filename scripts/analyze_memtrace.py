@@ -99,15 +99,32 @@ def main(argv=None):
             print(f"  {name}: {s:+.4f} {unit}/batch  R^2={r2 if r2 is None else round(r2, 3)}")
     print()
 
-    # Per-substep attribution (disc loop / gen loop / post-step).
+    # Per-phase attribution. uordblks (live arena) is the RELIABLE counter --
+    # whichever phase's uord delta tracks the per-batch leak is the culprit.
+    # RSS deltas lag malloc and misattribute, so they're shown only for reference.
     subs = [r.get("substeps") for r in rows if r.get("substeps")]
     if subs:
-        print("Per-substep mean RSS delta (MiB/step):")
-        for key in ("disc_loop_mib", "gen_loop_mib", "poststep_mib", "total_mib"):
-            m = _mean([s.get(key) for s in subs])
-            if m is not None:
-                print(f"  {key:14s}: {m:+.3f}")
-        print()
+        uord_keys = []
+        for s in subs:
+            for k in s:
+                if k.endswith("_uord_mib") and k not in uord_keys:
+                    uord_keys.append(k)
+        if uord_keys:
+            print("Per-phase mean uordblks (live-arena) delta (MiB/tick) -- RELIABLE:")
+            for key in uord_keys:
+                m = _mean([s.get(key) for s in subs])
+                if m is not None:
+                    print(f"  {key:26s}: {m:+.3f}")
+            print()
+        rss_keys = sorted({k for s in subs for k in s
+                           if k.endswith("_mib") and not k.endswith("_uord_mib")})
+        if rss_keys:
+            print("Per-phase mean RSS delta (MiB/tick, lags malloc -- reference only):")
+            for key in rss_keys:
+                m = _mean([s.get(key) for s in subs])
+                if m is not None:
+                    print(f"  {key:26s}: {m:+.3f}")
+            print()
 
     # malloc_trim reclaimability, if the run enabled SNOWGAN_MEMTRACE_TRIM.
     trims = [r["trim"]["reclaimed_mib"] for r in rows if r.get("trim")]
