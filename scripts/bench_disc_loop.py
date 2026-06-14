@@ -20,6 +20,7 @@ dispatch and won't show CPU-only. Pure native counters, no memtrace file.
 import argparse
 import types
 
+import numpy as np
 import tensorflow as tf
 
 from snowgan.models.discriminator import Discriminator
@@ -59,6 +60,9 @@ def main(argv=None):
     ap.add_argument("--no-augment", dest="augment", action="store_false")
     ap.add_argument("--sn", dest="sn", action="store_true", default=True, help="spectral_norm on the critic")
     ap.add_argument("--no-sn", dest="sn", action="store_false")
+    ap.add_argument("--numpy-real", action="store_true",
+                    help="feed the real images as a NumPy array (like next_batch's np.stack) "
+                         "instead of a tf.Tensor -- reproduces the real disc loop's input")
     ap.add_argument("--steps", type=int, default=400)
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--resolution", type=int, default=1024)
@@ -77,7 +81,10 @@ def main(argv=None):
 
     base = None
     for step in range(args.steps + 1):
-        real = tf.random.normal(img_shape)
+        if args.numpy_real:
+            real = np.random.randn(*img_shape).astype("float32")  # NumPy, like next_batch
+        else:
+            real = tf.random.normal(img_shape)
         if use_gen:
             noise = tf.random.normal([args.batch, latent])
             fake = tf.stop_gradient(gen(noise, training=True))

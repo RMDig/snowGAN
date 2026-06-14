@@ -60,10 +60,20 @@ def _mean(vals):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("path", help="memtrace JSONL file")
+    ap.add_argument("paths", nargs="+", help="memtrace JSONL file(s); a glob like "
+                                             "memtrace-*.jsonl is analyzed separately per file")
     args = ap.parse_args(argv)
 
-    rows = _load(args.path)
+    rc = 0
+    for i, path in enumerate(args.paths):
+        if len(args.paths) > 1:
+            print(f"\n########## {path} ##########")
+        rc |= _analyze_one(path)
+    return rc
+
+
+def _analyze_one(path):
+    rows = _load(path)
     if len(rows) < 2:
         print(f"Need >=2 records to fit a trend; found {len(rows)}.")
         return 1
