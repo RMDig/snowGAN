@@ -113,6 +113,7 @@ config_template = {
             "fid_interval": 0,
             "multiscale_disc": False,
             "grad_clip_norm": 0.0,
+            "max_rss_mb": 0,
             "ada_target": 0.0,
             "adaptive_steps": False,
             "seed": 42,
@@ -172,7 +173,7 @@ class build:
             config_json = config_template
         return config_json
 
-    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0):
+    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0):
 		# Process lists
         if isinstance(filter_counts, str):
             filter_counts = [int(datum) for datum in filter_counts.split(' ')]
@@ -258,6 +259,8 @@ class build:
         self.fid_interval = int(fid_interval) if fid_interval else 0
         self.multiscale_disc = bool(multiscale_disc)
         self.grad_clip_norm = float(grad_clip_norm) if grad_clip_norm else 0.0
+        # RSS ceiling (MiB) for the restart wrapper; 0 disables.
+        self.max_rss_mb = float(max_rss_mb) if max_rss_mb else 0.0
         self.ada_target = float(ada_target) if ada_target else 0.0
         self.adaptive_steps = bool(adaptive_steps)
         self.seed = int(seed) if seed is not None else 42
@@ -322,6 +325,7 @@ class build:
             "fid_interval": self.fid_interval,
             "multiscale_disc": self.multiscale_disc,
             "grad_clip_norm": self.grad_clip_norm,
+            "max_rss_mb": self.max_rss_mb,
             "ada_target": self.ada_target,
             "adaptive_steps": self.adaptive_steps,
             "seed": self.seed,
@@ -442,6 +446,8 @@ def configure_generic(config, args):
         config.multiscale_disc = args.multiscale_disc
     if getattr(args, "grad_clip_norm", None) is not None:
         config.grad_clip_norm = args.grad_clip_norm
+    if getattr(args, "max_rss_mb", None) is not None:
+        config.max_rss_mb = args.max_rss_mb
     if getattr(args, "ada_target", None) is not None:
         config.ada_target = args.ada_target
     if getattr(args, "adaptive_steps", None) is not None:

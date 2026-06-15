@@ -27,6 +27,12 @@ def assert_spectral_norm_consistency(expected_sn, weights_path, which="Discrimin
     )
 
 
+# Exit code the trainer uses when it stops itself at the --max_rss_mb ceiling.
+# The restart wrapper relaunches the run while it sees this exact code, and
+# stops on anything else (normal completion, error, Ctrl-C). 75 = EX_TEMPFAIL.
+_RESTART_EXIT_CODE = 75
+
+
 def cosine_decayed_lr(base_lr, lr_min, post_fade_step, decay_steps):
     """Cosine-annealed learning rate, extracted as a pure function so the
     schedule can be unit-tested without constructing a Trainer.
@@ -242,6 +248,13 @@ class Trainer:
 
         # Gradient clipping
         self.grad_clip_norm = getattr(self.gen.config, 'grad_clip_norm', 0.0)
+
+        # Restart-wrapper ceiling: if process RSS exceeds this (MiB), save and
+        # exit with _RESTART_EXIT_CODE so a wrapper relaunches a clean process.
+        # 0 disables. Workaround for the native CPU-RAM leak that OOM-kills long
+        # runs (see docs/cpu-ram-leak-investigation.md); atomic saves (UPGRADES
+        # #8) make the kill/resume safe.
+        self.max_rss_mb = float(getattr(self.gen.config, 'max_rss_mb', 0) or 0)
 
         # Fixed seed for consistent visual tracking across batches
         self._tracking_seed = tf.random.normal([self.n_samples, self.gen.config.latent_dim])
@@ -563,6 +576,16 @@ class Trainer:
                     gc.collect()
                 rss_mb = _process_rss_mb()
                 print(f'Epoch {epoch} | Batch {batch} | Generator loss: {round(float(self.loss["gen"][-1]), 3)} | Discrimintator loss: {round(float(self.loss["disc"][-1]), 3)} | RSS: {rss_mb:.0f} MiB')
+
+                # Leak workaround: when RSS crosses the configured ceiling, save
+                # a fresh top-level checkpoint and exit with the sentinel code so
+                # the restart wrapper relaunches a clean process before the OS
+                # OOM-kills this one. Atomic saves make this kill/resume safe.
+                if self.max_rss_mb > 0 and rss_mb > self.max_rss_mb:
+                    print(f"RSS {rss_mb:.0f} MiB exceeded --max_rss_mb {self.max_rss_mb:.0f}; "
+                          f"saving and exiting (code {_RESTART_EXIT_CODE}) for restart.", flush=True)
+                    self.save_model()  # rolling top-level checkpoint for resume
+                    sys.exit(_RESTART_EXIT_CODE)
 
 
                 # Plot training curves on a fixed batch cadence to avoid I/O storm
