@@ -162,6 +162,7 @@ def parse_args():
     parser.add_argument('--fid_interval', type=int, default=None, help='Steps between FID evaluations (0 to disable)')
     parser.add_argument('--multiscale_disc', action='store_true', default=None, help='Enable multi-scale discriminator (adds 256x256 head)')
     parser.add_argument('--grad_clip_norm', type=float, default=None, help='Global gradient norm clipping (0 to disable)')
+    parser.add_argument('--max_rss_mb', type=float, default=None, help='Process RSS ceiling in MiB. When exceeded, the trainer saves a fresh checkpoint and exits with code 75 so a restart wrapper relaunches a clean process (workaround for the native CPU-RAM leak that OOM-kills long runs). 0/unset disables.')
     parser.add_argument('--ada_target', type=float, default=None, help='ADA target disc accuracy on reals (e.g. 0.6, 0 to disable)')
     parser.add_argument('--adaptive_steps', action='store_true', default=None, help='Enable adaptive disc/gen training step ratio')
 

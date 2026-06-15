@@ -1,4 +1,4 @@
-import os, atexit, re, shutil, math, gc
+import os, re, shutil, math, gc, sys
 import tensorflow as tf
 from tensorflow import keras
 import numpy as np
@@ -25,6 +25,12 @@ def assert_spectral_norm_consistency(expected_sn, weights_path, which="Discrimin
         f"model architecture disagree — this usually means a mixed/stale save_dir. "
         f"Start fresh: move the directory aside, or pass --rebuild to ignore saved weights."
     )
+
+
+# Exit code the trainer uses when it stops itself at the --max_rss_mb ceiling.
+# The restart wrapper relaunches the run while it sees this exact code, and
+# stops on anything else (normal completion, error, Ctrl-C). 75 = EX_TEMPFAIL.
+_RESTART_EXIT_CODE = 75
 
 
 def cosine_decayed_lr(base_lr, lr_min, post_fade_step, decay_steps):
@@ -185,7 +191,17 @@ class Trainer:
 
         self.loss, self.trained_data = load_history(self.gen.config.save_dir) # Load any history we can find in save directory
 
-        atexit.register(self.save_model)
+        # NOTE: deliberately NO atexit checkpoint here. atexit does not fire on
+        # SIGKILL / OOM-kill (the failure mode the leak hunt surfaced — runs are
+        # OOM-killed mid-batch), so an atexit-only top-level checkpoint goes
+        # stale the moment a run dies, leaving resume to load weights older than
+        # the batch counter recovered from the snapshot dirs. Worse, an interrupt
+        # *during* the atexit save truncated the live generator.weights.h5 to a
+        # 0-variable skeleton (2026-06-09). The live top-level checkpoint is now
+        # written on the step interval in train() via the atomic _atomic_save_weights,
+        # which is both signal-safe (written during the run, not at exit) and
+        # crash-safe. (CLAUDE.md §4 "no atexit for correctness-critical state";
+        # UPGRADES #8.)
 
         print("Trainer initialized...")
         # Global step for fade scheduling (persisted in config)
@@ -232,6 +248,13 @@ class Trainer:
 
         # Gradient clipping
         self.grad_clip_norm = getattr(self.gen.config, 'grad_clip_norm', 0.0)
+
+        # Restart-wrapper ceiling: if process RSS exceeds this (MiB), save and
+        # exit with _RESTART_EXIT_CODE so a wrapper relaunches a clean process.
+        # 0 disables. Workaround for the native CPU-RAM leak that OOM-kills long
+        # runs (see docs/cpu-ram-leak-investigation.md); atomic saves (UPGRADES
+        # #8) make the kill/resume safe.
+        self.max_rss_mb = float(getattr(self.gen.config, 'max_rss_mb', 0) or 0)
 
         # Fixed seed for consistent visual tracking across batches
         self._tracking_seed = tf.random.normal([self.n_samples, self.gen.config.latent_dim])
@@ -554,6 +577,16 @@ class Trainer:
                 rss_mb = _process_rss_mb()
                 print(f'Epoch {epoch} | Batch {batch} | Generator loss: {round(float(self.loss["gen"][-1]), 3)} | Discrimintator loss: {round(float(self.loss["disc"][-1]), 3)} | RSS: {rss_mb:.0f} MiB')
 
+                # Leak workaround: when RSS crosses the configured ceiling, save
+                # a fresh top-level checkpoint and exit with the sentinel code so
+                # the restart wrapper relaunches a clean process before the OS
+                # OOM-kills this one. Atomic saves make this kill/resume safe.
+                if self.max_rss_mb > 0 and rss_mb > self.max_rss_mb:
+                    print(f"RSS {rss_mb:.0f} MiB exceeded --max_rss_mb {self.max_rss_mb:.0f}; "
+                          f"saving and exiting (code {_RESTART_EXIT_CODE}) for restart.", flush=True)
+                    self.save_model()  # rolling top-level checkpoint for resume
+                    sys.exit(_RESTART_EXIT_CODE)
+
 
                 # Plot training curves on a fixed batch cadence to avoid I/O storm
                 if batch % 10 == 0:
@@ -570,7 +603,14 @@ class Trainer:
                             self.save_model(best_dir)
                             print(f"New best FID! Model saved to {best_dir}")
 
-                # Save the models state
+                # Save the model state on the step interval. Write the rolling
+                # top-level checkpoint (the live state __init__ resumes from)
+                # AND a numbered batch snapshot. Persisting the top-level here —
+                # during the run, atomically — is what replaces the removed
+                # atexit save: an OOM-kill (or the restart wrapper) now leaves a
+                # current, consistent checkpoint instead of whatever the last
+                # graceful exit wrote (UPGRADES #8). save_model() is atomic per
+                # file, so a crash mid-save cannot truncate either target.
                 if batch % self._save_interval == 0:
                     # Log the live LR so a floored/over-decayed schedule is
                     # visible in the run log instead of silently freezing
@@ -579,6 +619,7 @@ class Trainer:
                         gen_lr = float(self.gen.optimizer.learning_rate.numpy())
                         disc_lr = float(self.disc.optimizer.learning_rate.numpy())
                         print(f"LR @ step {self.global_step}: gen={gen_lr:.2e} disc={disc_lr:.2e}")
+                    self.save_model()  # rolling top-level live checkpoint
                     self.save_model(f"{self.save_dir}/batch_{batch}/")
                     if self.cleanup_milestone > 0 and batch % self.cleanup_milestone == 0:
                         self._cleanup_saved_batches(100)
@@ -776,7 +817,7 @@ class Trainer:
         self.global_step += 1
         self._update_fade_completion()
         # Persist fade progress across generator/discriminator configs for resume support
-        # Throttle disk writes to every 50 steps (atexit save_model covers final state)
+        # Throttle disk writes to every 50 steps (the step-interval save_model covers final state)
         self._sync_fade_progress(persist=(self.global_step % 50 == 0))
 
         # Post-step improvements
@@ -826,6 +867,36 @@ class Trainer:
                 f"output depth."
             )
 
+    def _atomic_save_weights(self, model, final_path):
+        """Write weights to a temp file in the same directory, then atomically
+        ``os.replace()`` it into place.
+
+        A direct ``model.save_weights(final_path)`` truncates the live file the
+        instant it starts writing, so an OOM-kill / Ctrl-C / restart-wrapper kill
+        mid-write leaves a 0-variable skeleton and the last-good checkpoint is
+        gone (observed: ``generator.weights.h5`` reduced to 10 KB / 0 datasets,
+        2026-06-09). Writing to a sibling temp and renaming makes the swap atomic
+        on the same filesystem — a crash mid-write leaves the previous good file
+        intact. (CLAUDE.md atomic-write rule; UPGRADES #8.)
+
+        Keras infers the serialization format from the extension, so the temp
+        name keeps the ``.weights.h5`` suffix (a bare ``.tmp`` would be rejected).
+        """
+        directory, base = os.path.split(final_path)
+        tmp_path = os.path.join(directory or ".", f"._tmp_{base}")
+        try:
+            model.save_weights(tmp_path)
+            os.replace(tmp_path, final_path)  # atomic rename on the same FS
+        finally:
+            # On success os.replace consumed tmp_path; on failure (including an
+            # interrupted write) drop the partial temp so it can't accumulate or
+            # be mistaken for a good file. The live final_path is never touched.
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
     def save_model(self, path = None):
         """
         Save the currently loaded generator and discriminator to a given path
@@ -848,8 +919,8 @@ class Trainer:
         # Save weights-only (no architecture, no Lambda layer serialization).
         # Weights are the most important artifact and must not be blocked by
         # a plotting failure.
-        self.gen.model.save_weights(f"{path}/generator.weights.h5")
-        self.disc.model.save_weights(f"{path}/discriminator.weights.h5")
+        self._atomic_save_weights(self.gen.model, f"{path}/generator.weights.h5")
+        self._atomic_save_weights(self.disc.model, f"{path}/discriminator.weights.h5")
 
         # Log and plot history (non-critical — failures here won't lose weights)
         try:
@@ -859,14 +930,14 @@ class Trainer:
             print(f"Warning: failed to save/plot history: {e}")
         # Save fade endpoints weights so mid-fade resume preserves toRGB_prev
         if getattr(self.gen, 'fade_endpoints', None) is not None:
-            self.gen.fade_endpoints.save_weights(f"{path}/generator_fade_endpoints.weights.h5")
+            self._atomic_save_weights(self.gen.fade_endpoints, f"{path}/generator_fade_endpoints.weights.h5")
         # Save multi-scale discriminator weights
         if self.disc_lowres is not None:
-            self.disc_lowres.save_weights(f"{path}/discriminator_lowres.weights.h5")
+            self._atomic_save_weights(self.disc_lowres, f"{path}/discriminator_lowres.weights.h5")
         # Save EMA shadow weights for resume
         if self.ema_weights is not None:
             backup = self._apply_ema_to_generator()
-            self.gen.model.save_weights(f"{path}/generator_ema.weights.h5")
+            self._atomic_save_weights(self.gen.model, f"{path}/generator_ema.weights.h5")
             self._restore_generator_weights(backup)
         print(f"Models saved in {path}...")
 
