@@ -137,6 +137,15 @@ break the checkpoint format).
    intact `keras/snowgan/core/batch_<N>/` snapshot. Fix `save_weights` to
    `tmp + os.replace()` before the next long run. See
    [cpu-ram-leak-investigation.md](cpu-ram-leak-investigation.md#checkpoint-corruption--recovery).
+   - ~~**atexit save + non-atomic weight writes**~~ **Resolved 2026-06-15
+     (`feat/atomic-save-survivable-runs`).** `atexit.register(self.save_model)`
+     is removed; every weight write in `save_model` goes through
+     `_atomic_save_weights` (sibling `._tmp_*.weights.h5` + `os.replace`), and a
+     rolling top-level checkpoint is written on the step interval during the run
+     (not at exit). An OOM-kill / restart-wrapper kill mid-write can no longer
+     truncate the live checkpoint, and resume always finds a current consistent
+     one. This makes the `--max_rss_mb` restart wrapper (leak workaround) safe.
+     **Still open:** atomic config-JSON writes (#34).
 
 9. **Split the god-config.**
    [config.py](../src/snowgan/config.py) is a 350-line dict + mutable class with `atexit`
