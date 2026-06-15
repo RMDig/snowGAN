@@ -32,6 +32,45 @@ break the checkpoint format).
 
 ## Tier 🔴 — correctness bugs to fix before the next training run
 
+0. **Native CPU-RAM leak OOM-kills long runs (~+3.6 MiB/batch).** 🔴 OPEN — the
+   single biggest blocker to a multi-day v0.2 run.
+
+   **Symptom.** Process RSS climbs dead-linearly (R²=1.0) at ~+3.6 MiB/batch and
+   the kernel OOM-kills training (observed: 31 GB RSS / `uord`=37 GB live arena,
+   `Killed` at batch ~15k). It is a *live* glibc-arena allocation (`mallinfo2`
+   `uordblks` tracks RSS; `malloc_trim` reclaims ~0) — **not** mmap/cuDNN
+   (`hblkhd`/`maps_count` flat, disproving the earlier Blackwell-JIT theory) and
+   **not** Python (`gc` object count + `tracemalloc` flat).
+
+   **What's been ruled out** (2026-06-14/15 hunt, tooling on
+   `diag/memtrace-native-v2`: `src/snowgan/memtrace.py`,
+   `scripts/analyze_memtrace.py`, `scripts/bench_disc_loop.py`):
+   every per-batch component is flat in isolation — disc forward/backward (SN on
+   or off), generator forward, **generator training/backprop**, `diff_augment`,
+   EMA (real-run A/B with `--ema_decay 0`), data load (`DataManager.next_batch`),
+   NumPy-vs-tensor image feed, and `plot_history`. A faithful bench combining
+   real HF images + full train step + gen training + plot stays **flat**, yet the
+   assembled long-running real process leaks. In-situ per-phase `uord` marks are
+   unreliable (glibc commits arena async between microsecond-apart marks — they
+   reported +1.1 MiB in a bracket containing zero allocating code), so only the
+   per-batch slope is trustworthy.
+
+   **Working theory.** A native TF-eager / CUDA host-allocator accumulation tied
+   to the assembled, long-running, trained-model process (possibly value- or
+   process-age-dependent) — which is why a fresh 400-step bench never reproduces
+   it.
+
+   **Workaround (shipped, PR #26).** `--max_rss_mb` + `scripts/train_with_restarts.sh`:
+   the trainer saves and exits (code 75) before OOM, the wrapper relaunches and
+   resumes. Atomic checkpointing (#8) makes the kill/resume safe. This unblocks
+   v0.2 but does not fix the leak.
+
+   **Next diagnostic step.** LD_PRELOAD a tcmalloc/gperftools heap profiler on a
+   short real run — it names the C++ allocation call stack (TF op / CUDA /
+   eager-context) directly, the one tool that ends the hunt. (smaps-per-mapping
+   diff is a cheaper-but-weaker fallback: identifies the growing region, not the
+   caller.)
+
 1. **Double-applied gradient penalty.**
    [losses.py:55](../src/snowgan/losses.py#L55) returns `mean((‖∇‖−1)²) · λ`. Then
    [models/discriminator.py:63](../src/snowgan/models/discriminator.py#L63) adds
