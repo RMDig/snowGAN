@@ -18,6 +18,9 @@ Run in the WSL ml-env (GPU): the leak is host-side allocation during GPU op
 dispatch and won't show CPU-only. Pure native counters, no memtrace file.
 """
 import argparse
+import contextlib
+import io
+import os
 import types
 
 import numpy as np
@@ -66,6 +69,13 @@ def main(argv=None):
     ap.add_argument("--train-gen", action="store_true",
                     help="also run a full generator training step (tracked gen forward -> disc "
                          "-> gen backprop -> apply) each iteration, as the real train_step does")
+    ap.add_argument("--real-data", action="store_true",
+                    help="load real images via DataManager.next_batch instead of random tensors")
+    ap.add_argument("--plot", action="store_true",
+                    help="run plot_history-equivalent matplotlib savefig every 10 steps on "
+                         "growing loss lists, as the real train loop does")
+    ap.add_argument("--out", default=None, help="also append the per-step uord trend to this file "
+                                                "(put it under the repo so it's readable on the host)")
     ap.add_argument("--steps", type=int, default=400)
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--resolution", type=int, default=1024)
@@ -79,12 +89,40 @@ def main(argv=None):
     gen = Generator(_gen_config(args.resolution)) if use_gen else None
     img_shape = (args.batch, 1, args.resolution, args.resolution, 3)
     latent = 100
-    print(f"BENCH gen={use_gen} augment={use_aug} sn={args.sn} steps={args.steps} "
-          f"batch={args.batch} res={args.resolution} | uord = glibc live-arena MiB", flush=True)
 
+    dm = None
+    if args.real_data:
+        from snowgan.data.dataset import DataManager
+        dm = DataManager(types.SimpleNamespace(
+            dataset="rmdig/rocky_mountain_snowpack", modality="core", seen_profiles=[],
+            resolution=[args.resolution, args.resolution], channels=3, train_ind=0))
+
+    plt = fig = ax = None
+    gloss_hist, dloss_hist = [], []
+    if args.plot:
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+
+    out_fh = open(args.out, "a", buffering=1) if args.out else None
+    header = (f"BENCH gen={use_gen} augment={use_aug} sn={args.sn} real_data={args.real_data} "
+              f"train_gen={args.train_gen} plot={args.plot} steps={args.steps} batch={args.batch} "
+              f"res={args.resolution} | uord = glibc live-arena MiB")
+    print(header, flush=True)
+    if out_fh:
+        out_fh.write(header + "\n")
+
+    _devnull = io.StringIO()
     base = None
     for step in range(args.steps + 1):
-        if args.numpy_real:
+        if args.real_data:
+            with contextlib.redirect_stdout(_devnull):
+                real = dm.next_batch(args.batch)
+                if real is None:
+                    dm.config.train_ind = 0
+                    real = dm.next_batch(args.batch)
+            _devnull.truncate(0); _devnull.seek(0)
+        elif args.numpy_real:
             real = np.random.randn(*img_shape).astype("float32")  # NumPy, like next_batch
         else:
             real = tf.random.normal(img_shape)
@@ -119,6 +157,21 @@ def main(argv=None):
             gen.optimizer.apply_gradients(zip(ggrads, gvars))
             del gtape, ggrads, gvars, synth, sout, gloss, gnoise
 
+        # plot_history-equivalent: reuse one figure, cla, plot growing loss
+        # lists, savefig -- every 10 steps, exactly like the real train loop.
+        if args.plot:
+            gloss_hist.append(0.1 + 0.0 * step)
+            dloss_hist.append(-0.1)
+            if step % 10 == 0:
+                if fig is None:
+                    fig, ax = plt.subplots()
+                ax.cla()
+                ax.plot(gloss_hist, label="Generator loss")
+                ax.plot(dloss_hist, label="Discriminator loss")
+                ax.set_title("GAN History"); ax.set_xlabel("Epochs"); ax.set_ylabel("Loss")
+                ax.legend()
+                fig.savefig(os.path.join(".", "_bench_history.png"))
+
         if step % args.report == 0:
             mi = _mallinfo2() or {}
             uord = mi.get("uordblks_mib")
@@ -126,8 +179,11 @@ def main(argv=None):
                 base = uord
             delta = (uord - base) if (uord is not None and base is not None) else float("nan")
             per = (delta / step) if step else 0.0
-            print(f"  step={step:>5} rss={_rss_mib():>7.0f} uord={uord if uord is None else round(uord, 1)} "
-                  f"delta={delta:+.1f}MiB per_step={per:+.3f}MiB", flush=True)
+            line = (f"  step={step:>5} rss={_rss_mib():>7.0f} uord={uord if uord is None else round(uord, 1)} "
+                    f"delta={delta:+.1f}MiB per_step={per:+.3f}MiB")
+            print(line, flush=True)
+            if out_fh:
+                out_fh.write(line + "\n")
 
 
 if __name__ == "__main__":
