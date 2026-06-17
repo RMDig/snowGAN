@@ -91,6 +91,7 @@ config_template = {
             "kernel_stride": [2, 2],
             "batch_norm": False,
             "gen_norm": None,
+            "gen_upsampler": "resize",
             "final_activation": "tanh",
             "zero_padding": None,
             "padding": "same",
@@ -173,7 +174,7 @@ class build:
             config_json = config_template
         return config_json
 
-    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0):
+    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0):
 		# Process lists
         if isinstance(filter_counts, str):
             filter_counts = [int(datum) for datum in filter_counts.split(' ')]
@@ -224,6 +225,9 @@ class build:
             self.gen_norm = "batch" if self.batch_norm else "none"
         else:
             self.gen_norm = str(gen_norm)
+        # Generator upsampler: "resize" (UpSampling+conv, no checkerboard but
+        # low-pass) or "transpose" (learned Conv3DTranspose, recovers detail).
+        self.gen_upsampler = str(gen_upsampler) if gen_upsampler else "resize"
         self.final_activation = final_activation or "tanh"
         self.zero_padding = zero_padding or None
         self.padding = padding or "same"
@@ -303,6 +307,7 @@ class build:
             "kernel_stride": self.kernel_stride,
             "batch_norm": self.batch_norm,
             "gen_norm": self.gen_norm,
+            "gen_upsampler": self.gen_upsampler,
             "final_activation":self.final_activation,
             "zero_padding": self.zero_padding,
             "padding": self.padding,
@@ -363,6 +368,7 @@ def configure_gen(config, args):
     if args.gen_kernel: config.kernel_size = [int(datum) for datum in args.gen_kernel.split(' ')]
     if args.gen_stride: config.kernel_stride = [int(datum) for datum in args.gen_stride.split(' ')]
     if args.gen_norm: config.gen_norm = args.gen_norm
+    if getattr(args, "gen_upsampler", None): config.gen_upsampler = args.gen_upsampler
     if args.gen_lr: config.learning_rate = args.gen_lr
     if args.gen_beta_1: config.beta_1 = args.gen_beta_1
     if args.gen_beta_2: config.beta_2 = args.gen_beta_2

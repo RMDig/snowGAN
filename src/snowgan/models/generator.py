@@ -67,40 +67,51 @@ class Generator(keras.Model):
         # spatial upsampling factor comes from kernel_stride.
         up_size = (1, self.config.kernel_stride[0], self.config.kernel_stride[1])
         gen_norm = getattr(self.config, "gen_norm", None) or ("batch" if self.config.batch_norm else "none")
+        # Upsampler: "resize" = UpSampling(nearest) + stride-1 conv (no
+        # checkerboard, but LOW-PASS — it smooths away high-frequency texture and
+        # the generator collapses to blobs). "transpose" = learned
+        # Conv3DTranspose (recovers fine detail like the magnified_profile model;
+        # use a kernel divisible by the stride, e.g. 4/2, to keep checkerboard
+        # mild). See docs/UPGRADES.md.
+        upsampler = getattr(self.config, "gen_upsampler", "resize") or "resize"
 
-        def conv_block(x, filters):
-            """Stride-1 conv + normalization + activation."""
-            x = keras.layers.Conv3D(filters, ksize, strides=1, padding=self.config.padding)(x)
+        def norm_act(x):
             if gen_norm == "batch":
                 x = keras.layers.BatchNormalization()(x)
             elif gen_norm == "pixel":
                 x = PixelNorm()(x)
             return keras.layers.LeakyReLU(self.config.negative_slope)(x)
 
+        def conv_block(x, filters):
+            """Stride-1 conv + normalization + activation."""
+            x = keras.layers.Conv3D(filters, ksize, strides=1, padding=self.config.padding)(x)
+            return norm_act(x)
+
         for filters in self.config.filter_counts:
-            # Resize-convolution upsampling (Odena et al. 2016, "Deconvolution
-            # and Checkerboard Artifacts"): nearest-neighbor upsample then a
-            # stride-1 conv, instead of a strided Conv3DTranspose whose kernel
-            # (3) does not divide the stride (2) and stamps a fixed checkerboard
-            # lattice into every output pixel — the grid texture seen in v0.1
-            # core samples. Two convs per resolution (ProGAN/StyleGAN) give the
-            # high-resolution stages the capacity a single 3x3 conv lacked.
-            x = keras.layers.UpSampling3D(size=up_size)(x)
-            x = conv_block(x, filters)
-            x = conv_block(x, filters)
+            if upsampler == "transpose":
+                # Learned upsampling (Conv3DTranspose) so the generator can
+                # synthesize texture, plus a stride-1 conv for capacity.
+                x = keras.layers.Conv3DTranspose(filters, ksize, strides=up_size, padding=self.config.padding)(x)
+                x = norm_act(x)
+                x = conv_block(x, filters)
+            else:
+                # Resize-convolution (Odena et al. 2016): nearest upsample + two
+                # stride-1 convs. Avoids checkerboard but is low-pass.
+                x = keras.layers.UpSampling3D(size=up_size)(x)
+                x = conv_block(x, filters)
+                x = conv_block(x, filters)
             feats.append(x)
 
-        # toRGB preserves the final doubling (the "+1" in the
-        # 16*2^(len(filter_counts)+1) resolution coupling) but as an
-        # UpSampling + stride-1 1x1 conv, so the pixel-producing layer carries
-        # no transposed-conv checkerboard.
-        #
-        # Pin the output head to float32 even under a mixed_float16 global
-        # policy. The final tanh saturates near ±1; computing it in fp16
-        # underflows around the asymptotes and overflows the upstream
-        # gradient. UPGRADES #15 cataloged this as a 🟠 correctness item.
-        x_rgb = keras.layers.UpSampling3D(size=up_size, name="toRGB_upsample")(x)
-        curr_img = keras.layers.Conv3D(self.config.channels, kernel_size=(1, 1, 1), strides=1, padding='same', activation=self.config.final_activation, use_bias=False, name="toRGB_curr", dtype="float32")(x_rgb)
+        # toRGB does the final doubling (the "+1" in the
+        # 16*2^(len(filter_counts)+1) resolution coupling). Pin the head to
+        # float32 even under a mixed_float16 policy: the tanh saturates near ±1
+        # and fp16 underflows the asymptotes / overflows the upstream gradient
+        # (UPGRADES #15).
+        if upsampler == "transpose":
+            curr_img = keras.layers.Conv3DTranspose(self.config.channels, ksize, strides=up_size, padding=self.config.padding, activation=self.config.final_activation, use_bias=False, name="toRGB_curr", dtype="float32")(x)
+        else:
+            x_rgb = keras.layers.UpSampling3D(size=up_size, name="toRGB_upsample")(x)
+            curr_img = keras.layers.Conv3D(self.config.channels, kernel_size=(1, 1, 1), strides=1, padding='same', activation=self.config.final_activation, use_bias=False, name="toRGB_curr", dtype="float32")(x_rgb)
 
         base_model = keras.Model(inputs, curr_img, name="Generator")
 
