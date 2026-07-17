@@ -194,6 +194,38 @@ break the checkpoint format).
     filter is correct against it. (`wind_loading` int→string in the same upload was a genuine
     `load_dataset` `ValueError` — card declared `['none','low','moderate','high']` vs data
     `'medium'` — and was fixed dataset-side; separate from snowGAN.)
+46. ~~**Adaptive `disc_steps` ratchets its own ceiling on every resume.**~~
+    **Resolved 2026-07-16.** `_update_adaptive_steps` wrote the evolved step count back
+    into `disc.config.training_steps`, which `Config.dump()` persists. On resume,
+    `Trainer.__init__` read that evolved value as `_base_disc_steps` and set
+    `max_steps = base * 2` — so the ceiling doubled per restart instead of staying
+    anchored to the launch value. Observed on the core run: disc_steps 1 (batch 100k)
+    → 6 → 10 → 16 (batch 332k) → 37, i.e. 37 critic updates per generator update.
+
+    Root cause: `training_steps` served as both the launch parameter and the live
+    adaptive counter, and persisting it conflated the two. Note `training_steps` is not
+    in the resume-state contract (CLAUDE.md §5 lists `train_ind`, `seen_profiles`,
+    `fade_step`, `current_epoch`, `global_batch`) — it was never meant to survive a
+    process.
+
+    Fix: the live counts (`Trainer._disc_steps` / `._gen_steps`) are runtime-only and
+    die with the process; `config.training_steps` is the launch parameter and is never
+    written during training. Regression test: `tests/unit/test_adaptive_steps.py`
+    simulates three save/resume cycles and asserts the ceiling does not move.
+
+    **Interacts with #0.** Each `--max_rss_mb` restart was a ratchet click, so the leak
+    workaround accelerated the ratchet, and the extra disc steps in turn made the leak
+    arrive sooner — a feedback loop. **Migration:** configs written before this fix hold
+    a poisoned `training_steps` (the core run's reads 37). It is indistinguishable from
+    a deliberate launch value, so it cannot be auto-detected — pass `--disc_steps N`
+    explicitly once on the next launch to reset it.
+
+    **Unverified lead for #0.** At disc_steps=37 the observed leak was ~46 MiB/batch
+    (RSS 23914 → 23960 → 24007 on consecutive batches) against the ~3.6 MiB/batch
+    measured when disc_steps was ~3. 37 × ~1.2 MiB ≈ 46 MiB fits, which would make the
+    leak **per-train-step, not per-batch**. If so, the flat `bench_disc_loop.py` result
+    may simply have run too few inner steps to show slope. Worth pinning the step count
+    as an axis in the next heap-profiler run before trusting any per-batch figure.
 
 ## Tier 🟠 — production readiness (do before calling this a product)
 
