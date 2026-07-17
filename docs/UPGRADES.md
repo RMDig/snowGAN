@@ -107,10 +107,18 @@ break the checkpoint format).
    set from a single string. The flag accepts input but silently discards it. Replace with
    `nargs=2, type=int` or `type=parse_resolution` where the parser splits `"1024x1024"`.
 
-6. **Boolean CLI flags accept any truthy string.**
+6. **Boolean CLI flags accept any truthy string.** 🔴 PARTIAL.
    `--fade`, `--xla`, `--mixed_precision`, `--rebuild`, `--gen_norm` all use `type=bool`.
    `--fade False` evaluates to `True`. Swap to `argparse.BooleanOptionalAction` (py ≥ 3.9)
    for `--fade / --no-fade` semantics.
+
+   **`--adaptive_steps` converted 2026-07-16** (see #46). It exposed a second, worse
+   variant of this bug that the `type=bool` framing misses: a `store_true` flag whose
+   value **persists into the config** is write-only. Omitting it means "no override",
+   so a saved `True` can never be cleared from the CLI — only by hand-editing the JSON.
+   `--spectral_norm`, `--augment`, `--multiscale_disc`, and `--rebuild` are all
+   `store_true` + persisted and still have this trap. They deserve the same treatment;
+   left out here to keep #46's diff scoped to the ratchet.
 
 7. **`latent_dim` is typed `float` but used as int.**
    [utils.py:101](../src/snowgan/utils.py#L101) → `type=float`. `config.latent_dim = int(...)`

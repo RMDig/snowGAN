@@ -165,7 +165,14 @@ def parse_args():
     parser.add_argument('--grad_clip_norm', type=float, default=None, help='Global gradient norm clipping (0 to disable)')
     parser.add_argument('--max_rss_mb', type=float, default=None, help='Process RSS ceiling in MiB. When exceeded, the trainer saves a fresh checkpoint and exits with code 75 so a restart wrapper relaunches a clean process (workaround for the native CPU-RAM leak that OOM-kills long runs). 0/unset disables.')
     parser.add_argument('--ada_target', type=float, default=None, help='ADA target disc accuracy on reals (e.g. 0.6, 0 to disable)')
-    parser.add_argument('--adaptive_steps', action='store_true', default=None, help='Enable adaptive disc/gen training step ratio')
+    # BooleanOptionalAction, not store_true: `adaptive_steps` persists into the
+    # config, and a store_true flag can only ever set it. Omitting the flag left
+    # args.adaptive_steps=None, which configure_generic reads as "no override" —
+    # so a persisted True could not be cleared from the CLI at all, only by
+    # hand-editing the config JSON. --no-adaptive_steps is the off switch.
+    parser.add_argument('--adaptive_steps', action=argparse.BooleanOptionalAction, default=None,
+                        help='Enable adaptive disc/gen training step ratio (--no-adaptive_steps to disable; '
+                             'omit to keep whatever the saved config has). Off by default on a fresh run.')
 
     # Modality selection: which depth-axis arrangement the trainer feeds the
     # GAN. "magnified_profile" / "core" / "profile" / "crystal_card" produce
