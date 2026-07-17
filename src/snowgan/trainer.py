@@ -960,7 +960,7 @@ class Trainer:
         ax.plot(self.loss['gen'], label='Generator loss')
         ax.plot(self.loss['disc'], label='Discriminator loss')
         ax.set_title("GAN History")
-        ax.set_xlabel("Epochs")
+        ax.set_xlabel("Train step (one per batch)")
         ax.set_ylabel("Loss")
         ax.legend()
         self._history_fig.savefig(os.path.join(self.save_dir, 'history.png'))
