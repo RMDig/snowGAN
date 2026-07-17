@@ -1,0 +1,5 @@
+# Shell scripts must keep LF endings regardless of core.autocrlf, or their
+# shebang becomes "#!/usr/bin/env bash\r" and the kernel can't find the
+# interpreter (env: 'bash\r': No such file or directory). This bites on every
+# checkout under core.autocrlf=true (Windows default here) and on WSL/Mac.
+*.sh text eol=lf
