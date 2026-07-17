@@ -120,7 +120,7 @@ def parse_args():
     parser.add_argument('--xla', action='store_true', default = False, help = 'Whether to use accelerated linear algebra (XLA) (defaults to False)')
     parser.add_argument('--mixed_precision', action='store_true', default = False, help = 'Use mixed_float16 precision to halve activation VRAM (safe to enable mid-training)')
 
-    parser.add_argument('--resolution', type = set, help = 'Resolution to downsample images too (Default set to (1024, 1024))')
+    parser.add_argument('--resolution', type = str, help = 'Target image resolution as "H W" (e.g. "256 256"). Must satisfy the filter_counts coupling: H = 16 * 2^(len(gen_filters)+1). Default (1024, 1024).')
     parser.add_argument('--n_samples', type = int, default = 10, help = "Number of synthetic images to generate (defaults to 10)")
     parser.add_argument('--batch_size', type = int, default = 4, help = 'Batch size (Defaults to 8)')
     parser.add_argument('--epochs', type = int, default = 10, help = 'Epochs to train on (Defaults to 10)')

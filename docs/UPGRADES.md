@@ -102,10 +102,12 @@ break the checkpoint format).
    env, and only then lets the rest of the package import TF. Invoke it first in the
    console-script entry.
 
-5. **`--resolution` flag is dead.**
-   [utils.py:97](../src/snowgan/utils.py#L97) declares `type=set` — argparse cannot build a
-   set from a single string. The flag accepts input but silently discards it. Replace with
-   `nargs=2, type=int` or `type=parse_resolution` where the parser splits `"1024x1024"`.
+5. ~~**`--resolution` flag is dead.**~~
+   **Resolved 2026-07-17.** Was `type=set`, so `--resolution "256 256"` became the
+   character set `{'2','5','6',' '}` and the requested size was silently discarded (the
+   config kept its 1024 default → guaranteed real/fake size mismatch on any low-res run).
+   Now `type=str`, split on whitespace into `[int, int]`, mirroring `--gen_kernel`.
+   Regression test: `tests/unit/test_resolution_cli.py`.
 
 6. **Boolean CLI flags accept any truthy string.**
    `--fade`, `--xla`, `--mixed_precision`, `--rebuild`, `--gen_norm` all use `type=bool`.

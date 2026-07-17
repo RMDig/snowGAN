@@ -423,7 +423,10 @@ def configure_generic(config, args):
     if getattr(args, "dataset_dir", None): config.dataset = args.dataset_dir
     if args.rebuild: config.rebuild = args.rebuild
 
-    if args.resolution: config.resolution = args.resolution
+    if args.resolution:
+        # "256 256" -> [256, 256]. Was type=set, which turned the string into a
+        # set of characters and silently ignored the requested size (UPGRADES #5).
+        config.resolution = [int(d) for d in str(args.resolution).split()]
     if args.n_samples: config.n_samples = args.n_samples
     if args.batch_size: config.batch_size = args.batch_size
     if args.epochs: config.epochs = args.epochs
