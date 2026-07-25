@@ -59,6 +59,49 @@ def normalize_datatype(value):
     )
 
 
+# --- Blue measurement-board masking (core modality) ---------------------------
+# Core photos are a snow sample on a blue ruler board; the board + ruler + printed
+# "Centimeters" text dominate every frame and are irrelevant (confounding) for the
+# downstream avalanche-risk task. A GAN trained on the raw frames collapses onto
+# the board because it is the most consistent, learnable structure. The board is a
+# chromatic blue at a lighting-stable hue (measured hue peak 168-172 on PIL's 0-255
+# scale across the whole split, spread 4), while snow is achromatic (low
+# saturation). Lighting moves brightness, not hue, so an HSV rule generalizes where
+# an RGB threshold would not. TF's rgb_to_hsv returns H,S,V in [0,1]; the PIL-scale
+# band [150,185]/255 and saturation floor 50/255 map to the constants below.
+_BOARD_HUE_LO = 150.0 / 255.0
+_BOARD_HUE_HI = 185.0 / 255.0
+_BOARD_SAT_MIN = 50.0 / 255.0
+# Fill masked board pixels with neutral grey (127.5 in 0-255 -> 0.0 after the
+# /127.5 - 1 rescale, i.e. the centre of tanh's linear region). This removes the
+# confound WITHOUT handing the generator a large flat region at a tanh rail (which
+# black, -> -1, would). UNCERTAIN: grey is the reasoned default but unproven for
+# feature transfer; if masked runs still degrade, black is the documented
+# fallback. See docs/UPGRADES.md #49 and the memory note.
+_BOARD_FILL_255 = 127.5
+
+
+def mask_blue_board(image_255):
+    """Zero out the blue measurement board, filling it with neutral grey.
+
+    Args:
+        image_255: RGB tensor in [0, 255], shape (H, W, 3).
+
+    Returns:
+        Same shape/range with board pixels set to neutral grey. Non-RGB inputs
+        (rank != 3 or channels != 3) are returned unchanged — the hue test needs
+        colour, so grayscale/other modalities are a no-op.
+    """
+    image_255 = tf.cast(image_255, tf.float32)
+    if image_255.shape.rank != 3 or image_255.shape[-1] != 3:
+        return image_255
+    hsv = tf.image.rgb_to_hsv(image_255 / 255.0)
+    hue, sat = hsv[..., 0], hsv[..., 1]
+    board = (hue >= _BOARD_HUE_LO) & (hue <= _BOARD_HUE_HI) & (sat >= _BOARD_SAT_MIN)
+    fill = tf.fill(tf.shape(image_255), tf.constant(_BOARD_FILL_255, tf.float32))
+    return tf.where(board[..., None], fill, image_255)
+
+
 def pair_depth_for_modality(modality: str) -> int:
     """Return the depth axis size that ``DataManager`` produces for a modality.
 
@@ -404,10 +447,17 @@ class DataManager:
         # the hottest loop in the data pipeline; keep it sync-free. (UPGRADES #51;
         # CLAUDE.md §6: print is legacy.)
 
+        # Mask the blue measurement board BEFORE the [-1,1] rescale, while pixels
+        # are still in [0,255] where the HSV thresholds are defined. Same op must
+        # run in the on-device phone pipeline (it is per-pixel arithmetic, no
+        # accelerator needed), so training and inference see identical inputs.
+        if getattr(self.config, "mask_board", False):
+            image = mask_blue_board(image)
+
         if image.shape.rank == 2:  # grayscale image
             image = tf.expand_dims(image, -1)
 
-        scaled_image = (tf.cast(image, tf.float32) / 127.5) - 1.0  
+        scaled_image = (tf.cast(image, tf.float32) / 127.5) - 1.0
         return scaled_image
 
     def merge_images(self, core, profile):

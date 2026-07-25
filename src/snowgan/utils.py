@@ -157,6 +157,7 @@ def parse_args():
     # Post-progressive training improvements
     parser.add_argument('--spectral_norm', action='store_true', default=None, help='Enable spectral normalization on the discriminator')
     parser.add_argument('--augment', action='store_true', default=None, help='Enable differentiable augmentation during training')
+    parser.add_argument('--mask_board', action=argparse.BooleanOptionalAction, default=None, help='Mask the blue measurement board out of core photos (HSV threshold -> neutral grey), removing the ruler/text confound so the model learns snow structure. Must be mirrored in the on-device phone pipeline. Default: off. See docs/UPGRADES.md #49.')
     parser.add_argument('--lr_decay', type=str, default=None, choices=['cosine'], help='Learning rate decay schedule (e.g. "cosine")')
     parser.add_argument('--lr_min', type=float, default=None, help='Minimum learning rate for LR decay (Defaults to 1e-7)')
     parser.add_argument('--lr_decay_steps', type=int, default=None, help='Cosine decay horizon in steps. Set to the planned run length so LRs reach lr_min at end-of-training, not partway through (0/unset = long-horizon fallback)')

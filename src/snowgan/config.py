@@ -108,6 +108,7 @@ config_template = {
             "cleanup_milestone": 1000,
             "spectral_norm": False,
             "augment": False,
+            "mask_board": False,
             "lr_decay": None,
             "lr_min": 1e-7,
             "lr_decay_steps": 0,
@@ -175,7 +176,7 @@ class build:
             config_json = config_template
         return config_json
 
-    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", gen_convs_per_resolution=2, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0):
+    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", gen_convs_per_resolution=2, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, mask_board=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0):
 		# Process lists
         if isinstance(filter_counts, str):
             filter_counts = [int(datum) for datum in filter_counts.split(' ')]
@@ -256,6 +257,7 @@ class build:
         # Post-progressive training improvements
         self.spectral_norm = bool(spectral_norm)
         self.augment = bool(augment)
+        self.mask_board = bool(mask_board)
         self.lr_decay = lr_decay  # "cosine" or None
         self.lr_min = float(lr_min) if lr_min is not None else 1e-7
         # Cosine decay horizon. 0 means "unset" — the trainer falls back to a
@@ -327,6 +329,7 @@ class build:
             "cleanup_milestone": self.cleanup_milestone,
             "spectral_norm": self.spectral_norm,
             "augment": self.augment,
+            "mask_board": self.mask_board,
             "lr_decay": self.lr_decay,
             "lr_min": self.lr_min,
             "lr_decay_steps": self.lr_decay_steps,
@@ -447,6 +450,8 @@ def configure_generic(config, args):
         config.spectral_norm = args.spectral_norm
     if getattr(args, "augment", None) is not None:
         config.augment = args.augment
+    if getattr(args, "mask_board", None) is not None:
+        config.mask_board = args.mask_board
     if getattr(args, "lr_decay", None) is not None:
         config.lr_decay = args.lr_decay
     if getattr(args, "lr_min", None) is not None:

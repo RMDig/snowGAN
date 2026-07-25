@@ -196,6 +196,34 @@ break the checkpoint format).
     filter is correct against it. (`wind_loading` int→string in the same upload was a genuine
     `load_dataset` `ValueError` — card declared `['none','low','moderate','high']` vs data
     `'medium'` — and was fixed dataset-side; separate from snowGAN.)
+49. **Blue measurement-board masking for the core modality** (`--mask_board`, added
+    2026-07-25). Core photos are a snow sample on a blue ruler board; the board, ruler,
+    and printed "Centimeters" text dominate every frame and are a confound for the
+    downstream avalanche-risk transfer task. Every core GAN run collapsed onto the board
+    (it is the most consistent, learnable structure), so the discriminator learned a
+    blue-board detector — useless as a transfer backbone. Diagnosed by finally *looking*
+    at a real core image (should have been step one).
+
+    Fix: `mask_blue_board` (in `data/dataset.py`) zeroes the chromatic-blue board to
+    neutral grey via an HSV rule. The board hue is lighting-stable — measured peak
+    168-172 on PIL's 0-255 scale across a 10-image spread of the whole split, spread of
+    4 — because lighting moves brightness (value), not hue; an RGB threshold would not
+    generalize. Snow is achromatic (low saturation) and survives. Verified on the hard
+    case (loose snow, no column, ruler present): board + ruler removed, snow structure
+    kept. Runs identically in training and the on-device phone pipeline (per-pixel
+    arithmetic, no accelerator needed), so both ends see the same input.
+
+    **UNCERTAINTY — grey vs black fill (revisit if masked runs underperform).** Masked
+    board pixels are filled with **neutral grey** (127.5 → 0.0 after the /127.5-1 rescale,
+    the centre of tanh's linear region). This is a *reasoned default, not a validated
+    one*: grey removes the confound WITHOUT handing the generator a large flat region at
+    a tanh rail, which **black** (→ -1) would — and re-inviting a rail is precisely the
+    saturation failure (#47/#48) we just escaped. But grey has not been shown superior
+    for *feature transfer*; it is possible black (or per-image snow-mean) transfers
+    better despite the rail risk, or that the fill choice barely matters. If masked
+    training still degrades — collapse, or poor downstream probe accuracy — **try black
+    as the documented fallback** before assuming masking itself failed. The fill value
+    lives in one constant (`_BOARD_FILL_255`) to make the swap a one-line change.
 
 ## Tier 🟠 — production readiness (do before calling this a product)
 
