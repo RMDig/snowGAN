@@ -77,3 +77,32 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
   never been isolated.
 - Every run changed multiple variables — none is clean evidence. Hence experiment 0 and
   §9.
+
+## Candidate increments (research-derived 2026-07-26; test one at a time)
+
+Repo inventory + web research (WGAN small-data stabilization) converged. Apply only
+after experiment 0 establishes a training baseline; one piece per campaign (multiple
+tuning runs per piece allowed — CLAUDE.md §9). Verdict column filled as we test.
+
+| Rank | Increment | Cost | Evidence | Verdict |
+|------|-----------|------|----------|---------|
+| 1 | **Critic-heavy ratio**: `--disc_steps 5 --gen_steps 1 --no-adaptive_steps`; sweep disc 5→8→15. Optional TTUR (D_lr 4e-4, G_lr 1e-4). | none (flags) | Both repo+web #1. Fresh defaults are inverted (steps 2:3, lr 10:1); the proven run was ~47:3; `adaptive_steps` drove core *gen*-heavy (retro-F). WGAN needs a near-optimal critic. | ⏳ |
+| 2 | **DiffAugment** real+fake (`--augment`, color+translation+cutout) | none (wired) | Zhao NeurIPS 2020 — usable GANs from 100 imgs. Verify rank-5 depth-consistency first. | ⏳ |
+| 3 | **SN-only, drop GP** (`--disc_lambda_gp 0`) | none | Resolves SN+GP double-Lipschitz; SN "often makes GP unnecessary" (Miyato 2018). | ⏳ |
+| 4 | **ADA** (`--ada_target 0.6`, needs #2) | none | StyleGAN2-ADA (Karras 2020), the ≥1k-img reference. | ⏳ |
+| 5 | **Minibatch-stddev** (NOT in this branch — parked on `fix/disc-minibatch-stddev`) | merge/code | ProGAN anti-collapse; reduce over BATCH axis, not depth. | ⏳ |
+| 6 | **R1+R2 + relativistic (R3GAN)** | code, baseline swap | Huang NeurIPS 2024 — modern small-data recipe. Sequence last. | ⏳ |
+
+**Strategic (architectural call, Denny's):** GAN-disc-as-backbone is defensible but
+transfers only modestly (~+5%; Xiang & Li 2020) and its quality is gated by
+not-collapsing. SSL does NOT need a big ViT — SimCLR/BYOL on a small *conv* encoder is
+phone-deployable and often beats ViTs / supervised transfer on small & medical imaging.
+Recommended posture: fix the GAN (1→4, generator wanted anyway) AND stand up a
+**SimCLR-on-the-same-conv-encoder arm as the baseline to beat** before GPU-months.
+Middle path if committed to disc-as-backbone: **FastGAN** (self-supervised decoder on
+the discriminator; stable from ≤100 imgs, Liu ICLR 2021).
+
+Sources: DiffAugment (arxiv 2006.10738), StyleGAN2-ADA (NVlabs), R3GAN (arxiv
+2501.05441), TTUR (arxiv 1706.08500), Spectral Norm (arxiv 1802.05957), FastGAN
+(openreview 1Fqg133qRaI), "Is Discriminator a Good Feature Extractor?" (arxiv
+1912.00789), SSL low-data (sciencedirect S0925231224019702).
