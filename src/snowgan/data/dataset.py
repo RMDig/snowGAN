@@ -11,6 +11,53 @@ from snowgan.modality import Modality
 _SINGLE_MODALITIES = {"core", "profile", "magnified_profile", "crystal_card"}
 _MERGED_MODALITY = "merged"
 
+# Canonical datatype encoding. The rmdig manifest and the modality names share
+# these strings; both normalize to the same ints, which are the representation
+# the rest of the data layer (pair_index, batch, batch_merged) and downstream
+# consumers (e.g. snowGradient reading dm.manifest) are written against.
+DATATYPE_TO_INT = {
+    "core": 0,
+    "profile": 1,
+    "magnified_profile": 2,
+    "crystal_card": 3,
+}
+_VALID_DATATYPE_INTS = set(DATATYPE_TO_INT.values())
+
+
+def normalize_datatype(value):
+    """Map a datatype to its canonical int (core=0, profile=1,
+    magnified_profile=2, crystal_card=3).
+
+    Accepts the rmdig manifest string, the equivalent modality name, or an
+    already-normalized int — the int case is idempotent so re-normalizing is
+    safe (e.g. a caller passing ``2`` instead of ``"magnified_profile"``).
+
+    Raises ``ValueError`` on any other value. An unknown datatype is a schema /
+    contract error and must fail loudly — never be silently skipped. A silent
+    skip is what made rmdig's 2026-08-17 int->string ``datatype`` change look
+    like an empty ``pair_index`` when the manifest JSONL was read directly
+    (bypassing HF's ClassLabel cast); via ``load_dataset`` the cast already
+    yields ints, so this normalization is defensive, not a bug fix
+    (docs/UPGRADES.md #50).
+    """
+    # bool is a subclass of int; reject it so True/False can't masquerade as 0/1.
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid datatype {value!r}: bool is not a datatype.")
+    if isinstance(value, (int, np.integer)):
+        as_int = int(value)
+        if as_int in _VALID_DATATYPE_INTS:
+            return as_int
+        raise ValueError(
+            f"Unknown datatype int {as_int!r}; expected one of "
+            f"{sorted(_VALID_DATATYPE_INTS)}."
+        )
+    if value in DATATYPE_TO_INT:
+        return DATATYPE_TO_INT[value]
+    raise ValueError(
+        f"Unknown datatype {value!r}; expected one of {sorted(DATATYPE_TO_INT)} "
+        f"or ints {sorted(_VALID_DATATYPE_INTS)}."
+    )
+
 
 def pair_depth_for_modality(modality: str) -> int:
     """Return the depth axis size that ``DataManager`` produces for a modality.
@@ -44,17 +91,27 @@ class DataManager:
         dataset_name = getattr(config, "dataset", None) or "rmdig/rocky_mountain_snowpack"
         self.dataset = load_dataset(dataset_name)
         manifest_df = self.dataset["train"].to_pandas().drop(columns=["image", "audio"], errors="ignore")
+
+        # Normalize datatype to canonical ints at the load boundary, so every
+        # consumer — pair_index/batch/batch_merged here, and external readers of
+        # dm.manifest (snowGradient) — sees one representation. Defensive: HF's
+        # ClassLabel cast in load_dataset already yields ints 0-3, so this is not
+        # required today; it guarantees the datatype=0/1/2/3 contract regardless
+        # of encoding (e.g. a consumer reading the JSONL directly, or if the
+        # ClassLabel schema is ever dropped) and is a single source of truth for
+        # the mapping. Idempotent; unknown values raise rather than skip silently.
+        if "datatype" in manifest_df.columns:
+            manifest_df["datatype"] = manifest_df["datatype"].map(normalize_datatype)
+
         self.manifest_columns = manifest_df.columns.tolist()
         self.manifest = manifest_df.values.tolist()
 
         self.config = config
 
-        self.translator = {
-            'core': 0,
-            'profile': 1,
-            'magnified_profile': 2,
-            'crystal_card': 3
-        }
+        # Single source of the datatype mapping (copied so callers can't mutate
+        # the module constant). Datatype normalization goes through
+        # normalize_datatype, which this mirrors.
+        self.translator = dict(DATATYPE_TO_INT)
 
         # Stack depth this DataManager will produce for the trainer. Derived
         # once at construction from config.modality so the trainer can read
@@ -185,7 +242,11 @@ class DataManager:
         if config:
             self.config = config
 
-        datatype = self.translator[datatype]
+        # Normalize the requested datatype to its canonical int. Idempotent, so
+        # callers may pass a modality name ("magnified_profile") or an int (2);
+        # the old `self.translator[datatype]` KeyError'd on an already-int arg.
+        # Compared below against the manifest's now-normalized int datatypes.
+        datatype = normalize_datatype(datatype)
 
         print(f"Collecting a batch...")
         
