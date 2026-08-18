@@ -259,9 +259,21 @@ class Trainer:
         # Fixed seed for consistent visual tracking across batches
         self._tracking_seed = tf.random.normal([self.n_samples, self.gen.config.latent_dim])
 
-        # Adaptive disc/gen step ratio
+        # Adaptive disc/gen step ratio.
+        #
+        # `config.training_steps` is the *launch* parameter and is never mutated
+        # during training. The live counts live here, on the trainer, and die
+        # with the process. Keeping them apart is what makes the resume ratchet
+        # impossible: when the adaptive count was written back into the config,
+        # every restart persisted it, re-read it as `_base_disc_steps`, and set
+        # a ceiling of 2x the *evolved* value -- so disc_steps climbed 5 -> 10
+        # -> 20 -> 40 across restarts (observed: 37 at batch ~332k). The leak
+        # workaround made this worse, since each --max_rss_mb restart was
+        # another ratchet click.
         self.adaptive_steps = getattr(self.gen.config, 'adaptive_steps', False)
         self._base_disc_steps = self.disc.config.training_steps
+        self._disc_steps = self.disc.config.training_steps
+        self._gen_steps = self.gen.config.training_steps
         self._disc_loss_ema = 0.0
         self._gen_loss_ema = 0.0
 
@@ -395,17 +407,18 @@ class Trainer:
         total = self._disc_loss_ema + self._gen_loss_ema + 1e-8
         disc_ratio = self._disc_loss_ema / total
 
-        # Adjust every 100 steps
+        # Adjust every 100 steps. The ceiling is anchored to the launch value,
+        # never to the current count, so it cannot drift across resumes.
         if self.global_step % 100 == 0 and self.global_step > 0:
             max_steps = self._base_disc_steps * 2
             if disc_ratio < 0.3:
                 # Disc too weak — give it more steps
-                self.disc.config.training_steps = min(self.disc.config.training_steps + 1, max_steps)
-                print(f"Adaptive steps: disc weak (ratio={disc_ratio:.2f}), disc_steps -> {self.disc.config.training_steps}")
+                self._disc_steps = min(self._disc_steps + 1, max_steps)
+                print(f"Adaptive steps: disc weak (ratio={disc_ratio:.2f}), disc_steps -> {self._disc_steps}")
             elif disc_ratio > 0.7:
                 # Disc too strong — reduce its steps
-                self.disc.config.training_steps = max(self.disc.config.training_steps - 1, 1)
-                print(f"Adaptive steps: disc strong (ratio={disc_ratio:.2f}), disc_steps -> {self.disc.config.training_steps}")
+                self._disc_steps = max(self._disc_steps - 1, 1)
+                print(f"Adaptive steps: disc strong (ratio={disc_ratio:.2f}), disc_steps -> {self._disc_steps}")
 
     def _update_ada(self, real_scores):
         """Adjust augmentation probability based on discriminator overfitting (ADA)."""
@@ -681,11 +694,12 @@ class Trainer:
             disc_steps (int) - Number N of training steps for the discriminator per epoch
             gen_steps (int) - Number M of training steps for the generator per epoch
         """
-        # Update training parameters if passed in
+        # Update training parameters if passed in. These override the live
+        # counts only — the config keeps the launch value (see __init__).
         if disc_steps:
-            self.disc.config.training_steps = disc_steps
+            self._disc_steps = disc_steps
         if gen_steps:
-            self.gen.config.training_steps = gen_steps
+            self._gen_steps = gen_steps
 
         # Set batch size to the number of images passed in
         batch_size = tf.shape(images)[0] 
@@ -703,7 +717,7 @@ class Trainer:
         # (UPGRADES #33). Empty-list guard handles training_steps=0.
         disc_losses: list[float] = []
         real_scores = None
-        for _ in range(self.disc.config.training_steps):
+        for _ in range(self._disc_steps):
             # Generate synthetic images outside the tape — no need to track generator ops for disc training
             synthetic_images = tf.stop_gradient(self._generate_with_fade(noise, training=True))
 
@@ -774,7 +788,7 @@ class Trainer:
         # Train the generator M times. Same accumulation pattern as the
         # discriminator loop above (UPGRADES #33).
         gen_losses: list[float] = []
-        for _ in range(self.gen.config.training_steps):
+        for _ in range(self._gen_steps):
             # Generate random noise to pass into the generator
             noise = tf.random.normal([batch_size, self.gen.config.latent_dim])
             # Initialize automtic differentiation during forward propogation
