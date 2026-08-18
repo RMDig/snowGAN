@@ -38,10 +38,23 @@ def _tiny_config(**over):
 
 
 def test_no_transposed_conv_layers():
+    # Default upsampler is "resize" -> no transposed conv (no checkerboard).
     tf.random.set_seed(0)
     gen = Generator(_tiny_config())
     names = [type(layer).__name__ for layer in gen.model.layers]
     assert not any("Transpose" in name for name in names), names
+
+
+def test_transpose_upsampler_uses_conv3dtranspose():
+    # The "transpose" upsampler restores learned upsampling (recovers texture);
+    # core uses kernel 4 / stride 2 to keep checkerboard mild.
+    tf.random.set_seed(0)
+    gen = Generator(_tiny_config(gen_upsampler="transpose", kernel_size=[4, 4]))
+    names = [type(layer).__name__ for layer in gen.model.layers]
+    assert any("Conv3DTranspose" in name for name in names), names
+    out = gen(tf.random.normal([2, 16]), training=False).numpy()
+    assert out.shape == (2, 1, 64, 64, 3)  # coupling preserved across upsamplers
+    assert out.min() >= -1.0 and out.max() <= 1.0
 
 
 def test_output_resolution_coupling_preserved():

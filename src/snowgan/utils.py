@@ -140,6 +140,7 @@ def parse_args():
     parser.add_argument('--gen_steps', type = int, help = 'Training steps the generator takes per batch (Defaults to 5)')
     parser.add_argument('--gen_filters', type = str, help = 'Generators filters per convolution layer (Defaults to [1024, 512, 256, 128, 64])')
     parser.add_argument('--gen_norm', type = str, default = None, choices = ['pixel', 'batch', 'none'], help = "Generator normalization: 'pixel' (PixelNorm, GP-safe, recommended for WGAN), 'batch' (BatchNorm), or 'none'. Default: none (legacy).")
+    parser.add_argument('--gen_upsampler', type = str, default = None, choices = ['resize', 'transpose'], help = "Generator upsampler: 'resize' (UpSampling+conv, no checkerboard but low-pass/blob-prone) or 'transpose' (learned Conv3DTranspose, recovers fine texture; use --gen_kernel 4 4 to keep checkerboard mild). Default: resize.")
 
     parser.add_argument('--disc_checkpoint', type = str, help = "Path to a pre-trained discriminator model to load")
     parser.add_argument('--disc_kernel', type = str, help = 'Discriminator kernel size (Defaults to [5, 5])')

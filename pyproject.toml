@@ -18,7 +18,10 @@ dependencies = [
   "pillow>=9.5",
   "datasets>=2.16",
   "click>=8.1",  # optional, if you use click/argparse
-  "tensorflow>=2.18",
+  # macOS: tensorflow-metal 1.2.0 dlopen-crashes against TF >= 2.20 (internal
+  # .so layout changed); 2.19 is the newest verified pairing on Apple Silicon.
+  'tensorflow>=2.18,<2.20; sys_platform == "darwin"',
+  'tensorflow>=2.18; sys_platform != "darwin"',
 ]
 
 [project.optional-dependencies]
@@ -27,6 +30,12 @@ dependencies = [
 # install lean for users who don't fetch hosted backbones.
 hub = [
   "huggingface_hub>=0.20",
+]
+# Apple-Silicon GPU support (PluggableDevice). NOTE: the Metal plugin has no
+# accelerated Conv3D/Conv3DTranspose kernels (measured at CPU parity), so it
+# does not speed up the current rank-5 architecture — see docs/UPGRADES.md.
+metal = [
+  'tensorflow-metal>=1.2; sys_platform == "darwin"',
 ]
 
 [tool.setuptools.packages.find]
