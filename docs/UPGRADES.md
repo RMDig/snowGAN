@@ -324,6 +324,20 @@ break the checkpoint format).
 
 ## Tier 🟡 — code health & velocity
 
+51. ~~**Per-image debug print in `preprocess_image` forced a GPU sync every image.**~~
+    **Resolved 2026-08-17.** `preprocess_image` did
+    `print(f"Max - {tf.reduce_max(image).numpy()} | Min {tf.reduce_min(image).numpy()}")`
+    after the resize — two `.numpy()` calls on GPU tensors in the hottest data-pipeline
+    loop. Each forces a device synchronization, so the GPU could not pipeline across
+    images; it also flooded stdout (a calibration run logged 1,682 `Max - …` lines and
+    nothing else). Measured cost, isolated on an already-local tensor (no HTTP): ~0.50
+    ms/image of pure sync (0.60 ms with the two syncs vs 0.10 ms pipelined, 6×) — ~71 s of
+    GPU stall per snowGradient epoch (~143k accesses) from this line alone, separate from
+    the URL-backed-image HTTP fetch cost (a distinct, larger issue not addressed here).
+    Fix: deleted the print (CLAUDE.md §6 — print is legacy). Regression test
+    `tests/unit/test_preprocess_no_sync_print.py` asserts `preprocess_image` emits no
+    per-image stdout and still normalizes to [-1, 1].
+
 20. **Tests.**
     - `tests/unit/test_losses.py`: `compute_gradient_penalty` on a frozen conv, assert the
       double-λ fix.
