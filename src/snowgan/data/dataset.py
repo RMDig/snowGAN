@@ -398,8 +398,12 @@ class DataManager:
             image = tf.convert_to_tensor(np.array(image))  # Convert from PIL to tensor
         
         image = tf.image.resize(image, self.config.resolution)
-        print(f"Max - {tf.reduce_max(image).numpy()} | Min {tf.reduce_min(image).numpy()} ")
-        
+        # NOTE: no per-image debug print here. `tf.reduce_max(...).numpy()` forces
+        # a device sync on every image (~0.5 ms/img measured on an RTX 5080), so
+        # the GPU cannot pipeline across images — plus it floods stdout. This is
+        # the hottest loop in the data pipeline; keep it sync-free. (UPGRADES #51;
+        # CLAUDE.md §6: print is legacy.)
+
         if image.shape.rank == 2:  # grayscale image
             image = tf.expand_dims(image, -1)
 
