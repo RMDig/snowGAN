@@ -163,6 +163,38 @@ break the checkpoint format).
     authorized to delete. Fix: persist `global_batch` in config alongside `fade_step`,
     drive the loop from that, delete the glob path.
 
+50. ~~**rmdig `datatype` int→string — defensive normalization (NOT a training-breaker).**~~
+    **Resolved 2026-08-17. Reclassified 🔴→🟡 — see the correction below.** rmdig re-uploaded
+    `rocky_mountain_snowpack` (3→7 sites, 1886→4040 rows); `metadata/preprocessed.jsonl` now
+    stores `datatype` as strings (`'core'`/`'profile'`/`'magnified_profile'`) instead of
+    ints.
+
+    **Correction:** an earlier version of this entry (and PR #28) claimed the change broke
+    `pair_index` / `batch()` and therefore snowGAN's own training. **That was wrong.** HF
+    `datasets` declares `datatype` as
+    `ClassLabel(['core','profile','magnified_profile','crystal_card'])`, so
+    `load_dataset(...).to_pandas()` casts it to ints 0–3 — exactly `DATATYPE_TO_INT`.
+    `DataManager` therefore sees ints and was never broken. The empty-`pair_index` symptom
+    only appears when reading the JSONL directly with pandas (bypassing the cast), which is
+    how it was mis-diagnosed.
+
+    **What the fix does (defensive, still worth keeping):** `normalize_datatype()` maps the
+    rmdig string, the modality name, or an already-int value to the canonical int, raising
+    on anything unknown (never silently skipping); `DataManager.__init__` applies it to the
+    manifest `datatype` column at load. This decouples the data layer from *whether* the
+    ClassLabel cast happens (correct for either encoding), gives a single source of truth for
+    the mapping so external readers of `dm.manifest` (snowGradient) don't re-derive it and
+    drift, and turns an unknown datatype into a loud error. Idempotent. `batch()`'s
+    `self.translator[datatype]` (which `KeyError`'d on an int arg) is now
+    `normalize_datatype(datatype)`. Regression test `tests/unit/test_datatype_schema.py`
+    (synthetic string manifest, no download).
+
+    **Downstream contract:** `dm.manifest`'s `datatype` is an int (0/1/2/3) — already what
+    `load_dataset` yields; this guarantees it regardless of encoding. snowGradient's `!= 0`
+    filter is correct against it. (`wind_loading` int→string in the same upload was a genuine
+    `load_dataset` `ValueError` — card declared `['none','low','moderate','high']` vs data
+    `'medium'` — and was fixed dataset-side; separate from snowGAN.)
+
 ## Tier 🟠 — production readiness (do before calling this a product)
 
 8. **Replace `atexit` with explicit, atomic, signal-safe checkpointing.**
