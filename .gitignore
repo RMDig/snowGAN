@@ -196,6 +196,8 @@ cuda-keyring_*.deb
 # otherwise stage all of it. Mirrors built by scripts/build_image_cache.py live
 # outside the repo (~/rmdig-cache-<size>) but are ignored here too in case
 # someone points --out at the worktree.
-data/
-rmdig-cache-*/
+# Leading slash: root-only. A bare `data/` also matches src/snowgan/data/,
+# which silently un-stages the data layer package.
+/data/
+/rmdig-cache-*/
 .leak_probe.py
