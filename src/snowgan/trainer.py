@@ -50,6 +50,39 @@ def cosine_decayed_lr(base_lr, lr_min, post_fade_step, decay_steps):
     return lr_min + (base_lr - lr_min) * cosine_factor
 
 
+def _git_sha() -> str:
+    """Short git SHA of the working tree, or "unknown".
+
+    CLAUDE.md §6 requires every run to log its SHA. This plan exists because
+    config forensics could not separate "the recipe changed" from "a regression
+    landed"; without the SHA in the run log, the next campaign inherits the same
+    ambiguity.
+    """
+    import subprocess
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        sha = out.stdout.strip()
+        if out.returncode != 0 or not sha:
+            return "unknown"
+        dirty = subprocess.run(["git", "-C", here, "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=5)
+        return sha + ("-dirty" if dirty.stdout.strip() else "")
+    except Exception:
+        return "unknown"
+
+
+def _gpu_name() -> str:
+    try:
+        gpus = tf.config.list_physical_devices("GPU")
+        if not gpus:
+            return "cpu"
+        return tf.config.experimental.get_device_details(gpus[0]).get("device_name", "gpu")
+    except Exception:
+        return "unknown"
+
+
 def _process_rss_mb() -> float:
     """Resident-set size of the current process in MiB. Linux /proc only."""
     try:
@@ -62,7 +95,8 @@ def _process_rss_mb() -> float:
     return 0.0
 
 from snowgan.checkpoint import resolve_weights_path, to_weights_path, weights_use_spectral_norm
-from snowgan.losses import compute_gradient_penalty
+from snowgan.losses import compute_gradient_penalty, critic_input_gradient_norm
+from snowgan.metrics import MetricsLog
 from snowgan.generate import generate, make_movie
 from snowgan.log import save_history, load_history
 from snowgan.data.dataset import DataManager
@@ -215,15 +249,40 @@ class Trainer:
         # Keep generator/discriminator configs aligned without forcing a disk write on init
         self._sync_fade_progress(persist=False)
 
-        # --- Post-progressive training improvements ---
-        # When spectral norm is active, reduce gradient penalty weight since SN
-        # already enforces the Lipschitz constraint — heavy GP on top over-constrains
-        # the discriminator and causes color drift / mode collapse.
-        use_sn = getattr(self.disc.config, 'spectral_norm', False)
-        if use_sn and self.disc.config.lambda_gp > 1.0:
-            old_gp = self.disc.config.lambda_gp
-            self.disc.config.lambda_gp = 1.0
-            print(f"Spectral norm active: reduced lambda_gp from {old_gp} to {self.disc.config.lambda_gp}")
+        # --- Lipschitz constraint strength ---
+        # This block used to clamp lambda_gp to 1.0 unconditionally whenever
+        # spectral norm was on, on the theory that SN already enforces the
+        # Lipschitz constraint and GP on top over-constrains the critic.
+        #
+        # The run forensics say otherwise, and the clamp had two costs. It was
+        # a silent mutation of a training-dynamics field that then got
+        # persisted, so the config no longer described the run; and it made
+        # lambda_gp > 1 *inexpressible* under SN, so the hypothesis could never
+        # be tested. Across all thirteen runs in both artifact trees the split
+        # is perfect: every run that produced structure had lambda_gp >= 10
+        # with SN OFF, and every run that collapsed had lambda_gp <= 1 with SN
+        # ON — including two that ran SN with lambda_gp exactly 0. At 256x256x3
+        # the Wasserstein term is O(400), so a penalty weighted 1.0 is
+        # numerically negligible against it (Gulrajani et al. use lambda=10
+        # where |W| is O(10)) and the critic is left constrained only by Keras
+        # SpectralNormalization, which normalizes a Conv3D's *reshaped kernel*
+        # rather than the convolution's operator norm.
+        #
+        # Opt-in via clamp_gp_under_sn for reproducing pre-2026-09 runs.
+        # See docs/plans/training_dynamics_recovery_plan.md §1.2 and 0.2.
+        resolved_gp, gp_note = self._resolve_lambda_gp(
+            self.disc.config.lambda_gp,
+            getattr(self.disc.config, 'spectral_norm', False),
+            getattr(self.disc.config, 'clamp_gp_under_sn', False),
+        )
+        # Held on the trainer, NOT written back to disc.config: persisting it
+        # destroyed the user's value irreversibly (dump() wrote 1.0 over their
+        # 10.0, and turning the flag off next launch could not recover it) --
+        # the very "silent mutation of a training-dynamics field" this block
+        # exists to stop.
+        self.lambda_gp = resolved_gp
+        if gp_note:
+            print(gp_note)
 
         # Differentiable augmentation
         self.use_augment = getattr(self.gen.config, 'augment', False)
@@ -258,6 +317,28 @@ class Trainer:
 
         # Fixed seed for consistent visual tracking across batches
         self._tracking_seed = tf.random.normal([self.n_samples, self.gen.config.latent_dim])
+
+        # Structured run log + critic instrumentation (plan 0.3/0.4). The two
+        # *_loss.txt files record one conflated scalar per side — disc_loss is
+        # (Wasserstein + lambda*GP), plus 0.5*W_lowres when multiscale is on —
+        # which is why no verdict in docs/experiments.md was ever reached with
+        # a number that meant what it was read to mean.
+        self.metrics = MetricsLog(self.gen.config.save_dir)
+        self.grad_probe_interval = int(getattr(self.disc.config, 'grad_probe_interval', 50) or 0)
+        # Dedicated RNG for the probe so instrumentation cannot perturb the
+        # training stream. Drawing probe noise from the global TF RNG would
+        # shift every subsequent noise draw and augmentation decision, making a
+        # run with instrumentation non-comparable to one without at the same
+        # seed (CLAUDE.md §3, determinism).
+        self._probe_rng = tf.random.Generator.from_seed(int(getattr(self.gen.config, 'seed', 42)) + 1)
+        # Hard step cap; 0 = uncapped.
+        self.max_steps = int(getattr(self.gen.config, 'max_steps', 0) or 0)
+        # Accumulated, not derived. `global_step * disc_steps` re-attributes the
+        # entire run history to whatever ratio is current, which is wrong after
+        # any resume with a different --disc_steps and badly wrong under
+        # adaptive_steps (2 -> 61 in the released run). check_gates.py slices on
+        # this axis, so a rescaled axis silently moves every gate.
+        self.critic_updates = int(getattr(self.gen.config, 'critic_updates', 0) or 0)
 
         # Adaptive disc/gen step ratio
         self.adaptive_steps = getattr(self.gen.config, 'adaptive_steps', False)
@@ -457,23 +538,36 @@ class Trainer:
 
             # Generate fake samples and extract features per-chunk to avoid
             # holding all full-resolution images in memory simultaneously.
+            # try/finally: this was the one EMA swap site without it. A failure
+            # between swap and restore (an OOM in the 1024^2 Inception pass is
+            # the realistic one) left the generator permanently holding EMA
+            # weights while training silently continued from them — and the
+            # outer `except Exception` below would have swallowed it.
             backup = self._apply_ema_to_generator()
-            fake_features_list = []
-            gen_batch = 4
-            for i in range(0, num_samples, gen_batch):
-                n = min(gen_batch, num_samples - i)
-                noise = tf.random.normal([n, self.gen.config.latent_dim])
-                chunk = self.gen.model(noise, training=False)
-                chunk = _flatten_depth(chunk)
-                chunk = tf.image.resize(chunk, (299, 299))
-                chunk = (chunk + 1.0) * 127.5
-                chunk = preprocess_input(chunk)
-                fake_features_list.append(inception_model(chunk, training=False).numpy())
-            self._restore_generator_weights(backup)
+            try:
+                fake_features_list = []
+                gen_batch = 4
+                for i in range(0, num_samples, gen_batch):
+                    n = min(gen_batch, num_samples - i)
+                    noise = tf.random.normal([n, self.gen.config.latent_dim])
+                    chunk = self.gen.model(noise, training=False)
+                    chunk = _flatten_depth(chunk)
+                    chunk = tf.image.resize(chunk, (299, 299))
+                    chunk = (chunk + 1.0) * 127.5
+                    chunk = preprocess_input(chunk)
+                    fake_features_list.append(inception_model(chunk, training=False).numpy())
+            finally:
+                self._restore_generator_weights(backup)
 
-            # Get real samples WITHOUT advancing the training pointer
+            # Get real samples WITHOUT advancing the training pointer.
+            # Modality comes from config: hardcoding 'magnified_profile' scored
+            # every core/merged run against the wrong modality.
             saved_ind = self.gen.config.train_ind
-            real_images = self.dataset.batch(num_samples, 'magnified_profile')
+            modality = getattr(self.gen.config, "modality", "magnified_profile")
+            if modality == "merged":
+                real_images = self.dataset.batch_merged(num_samples)
+            else:
+                real_images = self.dataset.batch(num_samples, modality)
             self.gen.config.train_ind = saved_ind  # Restore pointer
             if real_images is None:
                 return None
@@ -487,8 +581,18 @@ class Trainer:
             sigma_f = np.cov(fake_features, rowvar=False)
 
             diff = mu_r - mu_f
-            # Stable matrix sqrt via eigendecomposition
-            product = sigma_r @ sigma_f
+            # Stable matrix sqrt via eigendecomposition.
+            # NOTE: sigma_r @ sigma_f is NOT symmetric even though both factors
+            # are, and np.linalg.eigh reads only the lower triangle — so the
+            # previous `eigh(sigma_r @ sigma_f)` returned eigenvalues of a
+            # different matrix and the result was not a monotone transform of
+            # FID. Use the similarity-transform form: sqrt(sigma_r) @ sigma_f @
+            # sqrt(sigma_r) is symmetric PSD and shares its eigenvalues with
+            # sigma_r @ sigma_f, so eigh is valid on it.
+            sr_vals, sr_vecs = np.linalg.eigh(sigma_r)
+            sqrt_sigma_r = (sr_vecs * np.sqrt(np.maximum(sr_vals, 0))) @ sr_vecs.T
+            product = sqrt_sigma_r @ sigma_f @ sqrt_sigma_r
+            product = (product + product.T) / 2.0  # kill float asymmetry
             eigenvalues, _ = np.linalg.eigh(product)
             eigenvalues = np.maximum(eigenvalues, 0)
             sqrt_trace = np.sum(np.sqrt(eigenvalues))
@@ -518,6 +622,41 @@ class Trainer:
         # Update hyperparameters if passed in before training
         if batch_size: self.batch_size = batch_size
 
+        # Record the resolved recipe once per launch, so the run log says what
+        # the run actually did rather than what the (later-mutated) config file
+        # ends up saying. The released magnified_profiles config describes
+        # disc_steps 47 / spectral_norm on — a state reached ~130k steps AFTER
+        # that model acquired its structure, and entirely at lr 1e-7.
+        self.metrics.write_event(
+            "run_start",
+            global_step=int(self.global_step),
+            git_sha=_git_sha(),
+            tf_version=tf.__version__,
+            gpu=_gpu_name(),
+            modality=getattr(self.gen.config, "modality", None),
+            resolution=list(self.gen.config.resolution),
+            depth=int(getattr(self.gen.config, "depth", 1) or 1),
+            channels=int(getattr(self.gen.config, "channels", 3) or 3),
+            image_root=getattr(self.gen.config, "image_root", None),
+            batch_size=int(self.batch_size),
+            gen_steps=int(self.gen.config.training_steps),
+            disc_steps=int(self.disc.config.training_steps),
+            gen_lr=float(self.gen.config.learning_rate),
+            disc_lr=float(self.disc.config.learning_rate),
+            lambda_gp=float(self.disc.config.lambda_gp or 0.0),
+            spectral_norm=bool(getattr(self.disc.config, "spectral_norm", False)),
+            grad_clip_norm=float(self.grad_clip_norm),
+            adaptive_steps=bool(self.adaptive_steps),
+            multiscale_disc=bool(self.multiscale_disc),
+            ema_decay=float(self.ema_decay),
+            lr_decay=getattr(self.gen.config, "lr_decay", None),
+            lr_decay_steps=int(self.lr_decay_steps),
+            fade_steps=int(self.fade_steps),
+            honor_splits=bool(getattr(self.gen.config, "honor_splits", True)),
+            max_steps=int(self.max_steps),
+            seed=int(getattr(self.gen.config, "seed", 42)),
+        )
+
         start_epoch = int(getattr(self.gen.config, "current_epoch", 0) or 0)
         # Iterate through requested training batches
         for epoch in range(start_epoch, start_epoch + epochs):
@@ -540,6 +679,20 @@ class Trainer:
 
             trainable_data = True
             while trainable_data:
+                # Checked BEFORE the step, not after. Checking after meant
+                # re-entering an already-finished capped run performed one more
+                # real gradient update, overwrote the final checkpoint with an
+                # N+1-step model, and left check_gates.py evaluating a
+                # one-record window (read_last_launch filters to the final
+                # launch_id). A completed control run must be idempotent on
+                # re-invocation.
+                if self.max_steps and self.global_step >= self.max_steps:
+                    print(f"At --max_steps {self.max_steps} (global_step "
+                          f"{self.global_step}); nothing to do.", flush=True)
+                    self.metrics.write_event("max_steps_reached",
+                                             global_step=int(self.global_step),
+                                             batch=int(batch))
+                    return
                 # Load a new batch of subjects via the modality-aware
                 # dispatcher. config.modality determines whether this returns
                 # depth-1 single-modality samples or depth-2 merged stacks.
@@ -574,6 +727,21 @@ class Trainer:
                 # caused by cycles vs. true unfreed allocations.
                 if batch % 10 == 0:
                     gc.collect()
+
+                # Hard step cap reached by this step: save and stop. (The
+                # top-of-loop guard above handles re-entry; this one handles
+                # arriving at the cap.) Without a cap a single-modality run
+                # never ends — when the manifest is exhausted train_ind resets
+                # to 0 and the next fetch succeeds, so `trainable_data` never
+                # goes false and the epoch budget is inert.
+                if self.max_steps and self.global_step >= self.max_steps:
+                    print(f"Reached --max_steps {self.max_steps} at global_step "
+                          f"{self.global_step}; saving and stopping.", flush=True)
+                    self.save_model()
+                    self.metrics.write_event("max_steps_reached",
+                                             global_step=int(self.global_step), batch=int(batch))
+                    return
+
                 rss_mb = _process_rss_mb()
                 print(f'Epoch {epoch} | Batch {batch} | Generator loss: {round(float(self.loss["gen"][-1]), 3)} | Discrimintator loss: {round(float(self.loss["disc"][-1]), 3)} | RSS: {rss_mb:.0f} MiB')
 
@@ -702,6 +870,15 @@ class Trainer:
         # inner updates rather than only the final iteration's value
         # (UPGRADES #33). Empty-list guard handles training_steps=0.
         disc_losses: list[float] = []
+        # Per-inner-iteration instrument accumulators (plan 0.3). Kept as
+        # tensors and reduced once at the end of the step: float(x) on a device
+        # tensor is a host sync, and there is already one per inner iteration —
+        # converting five more per iteration would multiply that cost by six.
+        wass_terms: list = []
+        gp_terms: list = []
+        gp_norms: list = []
+        real_means: list = []
+        fake_means: list = []
         real_scores = None
         for _ in range(self.disc.config.training_steps):
             # Generate synthetic images outside the tape — no need to track generator ops for disc training
@@ -725,14 +902,26 @@ class Trainer:
                 # the SAME augmented tensors the critic is scored on, so the
                 # 1-Lipschitz constraint is enforced on the distribution the
                 # critic actually sees (DiffAugment recipe), not the raw manifold.
-                lambda_gp = self.disc.config.lambda_gp or 0.0
+                lambda_gp = getattr(self, "lambda_gp", self.disc.config.lambda_gp) or 0.0
                 if lambda_gp > 0:
-                    gp = compute_gradient_penalty(self.disc, disc_real, disc_fake)
+                    gp, gp_norm = compute_gradient_penalty(self.disc, disc_real, disc_fake)
                 else:
                     gp = tf.constant(0.0, dtype=tf.float32)
+                    gp_norm = tf.constant(float("nan"), dtype=tf.float32)
 
                 # Calculate EMD/loss for the discriminators outputs
                 disc_loss = self.disc.get_loss(output, synthetic_output, gp, lambda_gp)
+
+            # Record the loss components separately (plan 0.3). disc_loss alone
+            # is (Wasserstein + lambda*GP) and cannot answer "is the critic
+            # Lipschitz?" or "does the penalty bind?" — the two questions the
+            # scoreboard actually turns on.
+            wass_terms.append(tf.reduce_mean(tf.cast(synthetic_output, tf.float32))
+                              - tf.reduce_mean(tf.cast(output, tf.float32)))
+            gp_terms.append(tf.cast(gp, tf.float32) * lambda_gp)
+            gp_norms.append(tf.cast(gp_norm, tf.float32))
+            real_means.append(tf.reduce_mean(tf.cast(output, tf.float32)))
+            fake_means.append(tf.reduce_mean(tf.cast(synthetic_output, tf.float32)))
 
             # Backpropogate main discriminator
             disc_gradients = tape.gradient(disc_loss, self.disc.model.trainable_variables)
@@ -815,6 +1004,7 @@ class Trainer:
         self.loss['disc'].append(mean_disc_loss)
         # Increment global step after a full train step
         self.global_step += 1
+        self.critic_updates += int(self.disc.config.training_steps)
         self._update_fade_completion()
         # Persist fade progress across generator/discriminator configs for resume support
         # Throttle disk writes to every 50 steps (the step-interval save_model covers final state)
@@ -826,6 +1016,93 @@ class Trainer:
         self._update_adaptive_steps(mean_disc_loss, mean_gen_loss)
         if real_scores is not None:
             self._update_ada(real_scores)
+
+        # Structured metrics for this step (plan 0.3/0.4). One host sync here
+        # for the whole accumulated set, not one per inner iteration.
+        self._log_step_metrics(images, wass_terms, gp_terms, gp_norms,
+                               real_means, fake_means, mean_disc_loss, mean_gen_loss)
+
+    @staticmethod
+    def _resolve_lambda_gp(lambda_gp, spectral_norm, clamp_under_sn):
+        """Decide the effective gradient-penalty weight, and say why.
+
+        Pulled out of ``__init__`` so the decision has a single testable
+        definition — it silently rewrote a training-dynamics field for the
+        whole history of this repo and nothing covered it.
+
+        Returns:
+            tuple[float, str | None]: ``(lambda_gp, message_or_None)``.
+        """
+        lambda_gp = float(lambda_gp or 0.0)
+        if not spectral_norm or lambda_gp <= 1.0:
+            return lambda_gp, None
+        if clamp_under_sn:
+            return 1.0, (f"clamp_gp_under_sn: reduced lambda_gp from {lambda_gp} "
+                         f"to 1.0 (legacy pre-2026-09 behavior)")
+        return lambda_gp, (
+            f"NOTE: spectral_norm is ON together with lambda_gp={lambda_gp}. Both "
+            f"constrain the critic's Lipschitz constant; this is honored as "
+            f"configured. Pass --clamp_gp_under_sn to restore the old auto-clamp "
+            f"to 1.0. See docs/plans/training_dynamics_recovery_plan.md §1.2."
+        )
+
+    @staticmethod
+    def _reduce_mean_or_nan(values):
+        """Mean of a list of scalar tensors as a Python float; NaN when empty."""
+        if not values:
+            return float("nan")
+        return float(tf.reduce_mean(tf.stack(values)))
+
+    def _log_step_metrics(self, images, wass_terms, gp_terms, gp_norms,
+                          real_means, fake_means, mean_disc_loss, mean_gen_loss):
+        """Emit one ``metrics.jsonl`` record for the train step just finished.
+
+        Everything here is a *mean over the inner critic iterations*, not the
+        final iteration's value. The final iteration samples the most-trained
+        critic state of the batch and is systematically biased; the same
+        reasoning already applies to the loss curve (UPGRADES #33).
+        """
+        record = {
+            "global_step": int(self.global_step),
+            "epoch": int(getattr(self.gen.config, "current_epoch", 0) or 0),
+            "disc_loss": mean_disc_loss,
+            "gen_loss": mean_gen_loss,
+            # The pieces disc_loss conflates.
+            "wasserstein": self._reduce_mean_or_nan(wass_terms),
+            "gp_weighted": self._reduce_mean_or_nan(gp_terms),
+            "grad_norm_interp": self._reduce_mean_or_nan(gp_norms),
+            "d_real": self._reduce_mean_or_nan(real_means),
+            "d_fake": self._reduce_mean_or_nan(fake_means),
+            # Live dynamics, so a floored schedule or a ratcheted ratio is
+            # visible in the record rather than inferred afterwards.
+            "disc_steps": int(self.disc.config.training_steps),
+            "gen_steps": int(self.gen.config.training_steps),
+            "gen_lr": float(self.gen.optimizer.learning_rate.numpy()),
+            "disc_lr": float(self.disc.optimizer.learning_rate.numpy()),
+            "lambda_gp": float(self.disc.config.lambda_gp or 0.0),
+            "augment_p": float(self.augment_p),
+            # Critic updates, not train steps: gates expressed in train steps
+            # are not comparable across a disc_steps sweep.
+            "critic_updates": int(self.critic_updates),
+        }
+
+        # Unconditional Lipschitz probe, on its own cadence and its own tape.
+        # Deliberately not derived from the gradient penalty: the penalty call
+        # is skipped when lambda_gp == 0, so a GP-derived instrument would go
+        # silent in exactly the spectral-norm-only arm whose entire question is
+        # whether the critic is 1-Lipschitz.
+        if self.grad_probe_interval > 0 and self.global_step % self.grad_probe_interval == 0:
+            try:
+                probe_noise = self._probe_rng.normal(
+                    [int(tf.shape(images)[0]), self.gen.config.latent_dim])
+                fakes = tf.stop_gradient(self.gen.model(probe_noise, training=False))
+                record["grad_norm_real"] = float(critic_input_gradient_norm(self.disc, images))
+                record["grad_norm_fake"] = float(critic_input_gradient_norm(self.disc, fakes))
+                del probe_noise, fakes
+            except Exception as error:  # pragma: no cover - instrumentation must not kill a run
+                print(f"Warning: gradient-norm probe failed: {error}")
+
+        self.metrics.write(record)
 
     def _use_fade(self):
         return getattr(self.gen.config, 'fade', False) and getattr(self.gen, 'fade_endpoints', None) is not None and not self.fade_complete
