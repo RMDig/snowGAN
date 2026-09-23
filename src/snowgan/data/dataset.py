@@ -1,7 +1,9 @@
+import os
 import random
 from functools import cached_property
 
 from datasets import load_dataset
+from PIL import Image
 import tensorflow as tf
 import numpy as np
 
@@ -161,6 +163,44 @@ class DataManager:
         # `dataset.pair_depth` as the canonical value when sizing its models.
         self.pair_depth = pair_depth_for_modality(getattr(config, "modality", "magnified_profile"))
 
+        # Local image root (optional). The HF manifest's `image` column is
+        # URL-backed — `dataset['train'][i]['image']` issues an HTTP GET for a
+        # ~16 MB PNG on EVERY access, i.e. once per image per epoch. Measured on
+        # this dataset: 2.03 s/image over HTTP vs 0.007 s/image decoding the
+        # same row from a local 512 px cache — a 290x difference that makes the
+        # data pipeline ~97% of a 1024 px train step and completely hides the
+        # GPU. (UPGRADES #51 noted the HTTP cost in passing; this is the fix.)
+        #
+        # When `image_root` is set, images load from
+        # `<image_root>/<manifest file_path>` and the network is never touched.
+        # Rows missing from the root fall back to the HF column, so a partial
+        # mirror degrades in speed, not correctness.
+        raw_root = getattr(config, "image_root", None) or None
+        # expanduser: a root of "~/rmdig-cache-512" arriving from a config JSON or a
+        # quoted CLI arg would otherwise never match any file, giving a 100% miss
+        # rate that is invisible except as a run that is mysteriously 19x slower.
+        self.image_root = os.path.expanduser(raw_root) if raw_root else None
+        self._local_hits = 0
+        self._local_misses = 0
+        if self.image_root:
+            if "file_path" not in self.manifest_columns:
+                raise ValueError(
+                    "image_root was set but the manifest has no 'file_path' column, so "
+                    "local files cannot be resolved. Either unset image_root or use a "
+                    "dataset revision that carries file_path."
+                )
+            # Fail loudly rather than silently falling back to the URL-backed
+            # column: the whole point of this setting is throughput, and a typo'd
+            # or unmounted root costs ~290x per image with no other signal.
+            if not os.path.isdir(self.image_root):
+                raise ValueError(
+                    f"image_root {self.image_root!r} is not a directory. Training would "
+                    f"silently fall back to the URL-backed image column (~2 s of HTTP per "
+                    f"image, ~19x slower end to end). Build a mirror with "
+                    f"scripts/build_image_cache.py, or pass --image_root '' to opt out."
+                )
+            print(f"Local image root: {self.image_root}")
+
         # Track seen profiles across runs/epochs and keep in sync with config for persistence
         self.seen_profiles = set(getattr(self.config, "seen_profiles", []) or [])
         self.config.seen_profiles = self.seen_profiles
@@ -203,6 +243,96 @@ class DataManager:
             key: [(c, p) for c in cores[key] for p in profiles[key]]
             for key in cores.keys() & profiles.keys()
         }
+
+    @property
+    def held_out_keys(self):
+        """``(site, column, core)`` groups the training stream must not see.
+
+        ``derive_splits`` has always partitioned the groups 80/10/10 and
+        persisted the pools, and ``Trainer`` mirrors them onto both configs so
+        AvAI can evaluate against ``test_pool`` — but no batch path ever
+        consulted them. ``batch()`` filtered on ``datatype`` alone, so the GAN
+        trained on its own held-out groups and every downstream transfer probe
+        against these backbones was contaminated. This is the set that
+        ``batch`` / ``batch_merged`` now skip when ``config.honor_splits``.
+
+        Built from validation+test rather than *from* ``trained_pool`` on
+        purpose: the pools derive from ``pair_index``, which only contains
+        groups having **both** a core and a magnified profile. Filtering to
+        ``trained_pool`` would silently discard every unpaired group — a large
+        slice of the magnified_profile rows — which is data loss, not a
+        leakage fix. Excluding the held-out groups gives the same isolation and
+        keeps everything that was never in any pool.
+
+        Pools round-trip through JSON as ``list[list]``; keys are re-tupled
+        here so membership matches the manifest's tuple keys.
+
+        Memoized on the pool sizes rather than ``cached_property``, on purpose.
+        ``Trainer.__init__`` constructs the DataManager *before* it calls
+        ``derive_splits``, so a plain cache populated by any earlier access
+        would freeze an empty set and silently restore the leak — with no
+        error, which is the failure mode this method exists to close.
+        """
+        validation = getattr(self.config, "validation_pool", None) or []
+        test = getattr(self.config, "test_pool", None) or []
+        signature = (len(validation), len(test))
+        if getattr(self, "_held_out_signature", None) != signature:
+            self._held_out_keys = {tuple(entry) for entry in validation}
+            self._held_out_keys.update(tuple(entry) for entry in test)
+            self._held_out_signature = signature
+        return self._held_out_keys
+
+    def load_image(self, index, meta=None):
+        """Return the PIL/array image for a manifest row.
+
+        Prefers a local file under ``image_root`` (keyed by the manifest's
+        ``file_path``) and falls back to the HF ``image`` column — which is
+        URL-backed and pays an HTTP round trip per access.
+
+        Returns ``None`` when neither source yields an image, so callers can
+        skip the row rather than crash a long run on one bad file.
+        """
+        # getattr, not attribute access: the test suite constructs DataManager
+        # via __new__ with a synthetic manifest (test_dataset / test_splits /
+        # test_modality_modes), so __init__-assigned state may not exist.
+        image_root = getattr(self, "image_root", None)
+        if image_root:
+            if meta is None:
+                meta = self._get_manifest_entry(index)
+            relative = (meta or {}).get("file_path")
+            if relative:
+                local = os.path.join(image_root, str(relative))
+                if os.path.exists(local):
+                    try:
+                        with Image.open(local) as handle:
+                            image = np.asarray(handle.convert("RGB"), dtype=np.uint8)
+                        self._local_hits = getattr(self, "_local_hits", 0) + 1
+                        return image
+                    except (OSError, ValueError) as error:
+                        # A truncated/corrupt local file must not be silently
+                        # swapped for a slow network fetch without saying so.
+                        print(f"Warning: local image {local} unreadable ({error}); "
+                              f"falling back to the remote column.")
+            misses = getattr(self, "_local_misses", 0) + 1
+            self._local_misses = misses
+            # A plain miss is otherwise the silent case: no exception, just a
+            # ~2 s HTTP GET instead of 7 ms. Say so the first time and then on a
+            # widening cadence, so an incomplete mirror is visible in the log
+            # without flooding it.
+            if misses in (1, 10, 100, 1000) or misses % 5000 == 0:
+                print(f"NOTE: {misses} image(s) missing from image_root "
+                      f"{image_root}; those rows fall back to the URL-backed "
+                      f"column (~2 s each). Mirror may be incomplete.")
+
+        return self.dataset['train'][index]['image']
+
+    def _is_held_out(self, meta):
+        """True when this manifest row belongs to a validation/test group."""
+        if not getattr(self.config, "honor_splits", True):
+            return False
+        if not self.held_out_keys:
+            return False
+        return (meta.get("site"), meta.get("column"), meta.get("core")) in self.held_out_keys
 
     def _get_manifest_entry(self, index):
         if index < 0 or index >= len(self.manifest):
@@ -301,10 +431,11 @@ class DataManager:
 
             print(f"Checking sample at index {self.config.train_ind} - {sample_datatype} - {datatype}")
 
-            if sample_datatype == datatype:
-                sample = self.dataset['train'][self.config.train_ind]
-
-                image = sample['image']
+            if sample_datatype == datatype and not self._is_held_out(meta):
+                image = self.load_image(self.config.train_ind, meta)
+                if image is None:
+                    self.config.train_ind += 1
+                    continue
 
                 scaled_image = self.preprocess_image(image)
 
@@ -317,8 +448,9 @@ class DataManager:
                 # HF datasets accumulates PIL/decoded buffers in process RAM
                 # on repeated indexed access (huggingface/datasets #4883, #7180).
                 # Drop references eagerly so they're collectable before the
-                # next iteration grabs another row.
-                del sample, image, scaled_image
+                # next iteration grabs another row. (`sample` is gone — the row
+                # is no longer materialized here; load_image owns that.)
+                del image, scaled_image
 
                 count += 1
             self.config.train_ind += 1
@@ -358,12 +490,19 @@ class DataManager:
 
             print(f"Checking sample at index {self.config.train_ind} - {sample_datatype}")
 
-            # If we've found a core sample
-            if sample_datatype == 0: 
+            # If we've found a core sample in a group we're allowed to train on
+            if sample_datatype == 0 and not self._is_held_out(meta):
 
-                sample = self.dataset['train'][self.config.train_ind]
-
-                core_image = self.preprocess_image(sample['image'])
+                # NB: no `self.dataset['train'][...]` here. Materializing an HF
+                # row decodes every column including the URL-backed `image`, so
+                # the old fetch paid a full ~16 MB HTTP GET per core candidate
+                # purely to read site/column/core -- values `meta` already has.
+                # That single line cancelled the image_root speedup on this path.
+                core_raw = self.load_image(self.config.train_ind, meta)
+                if core_raw is None:
+                    self.config.train_ind += 1
+                    continue
+                core_image = self.preprocess_image(core_raw)
                 self.seen_cores.add(self.config.train_ind)
 
                 profile_ind = self.config.train_ind
@@ -389,18 +528,20 @@ class DataManager:
                         if profile_ind in self.seen_profiles:
                             continue
 
-                        if profile_meta.get('site') != sample['site']:
+                        if profile_meta.get('site') != meta.get('site'):
                             continue
 
-                        if profile_meta.get('column') != sample['column']:
+                        if profile_meta.get('column') != meta.get('column'):
                             continue
 
-                        if profile_meta.get('core') != sample['core']:
+                        if profile_meta.get('core') != meta.get('core'):
                             continue
 
                         # Preprocessing image
-                        profile_sample = self.dataset['train'][profile_ind]
-                        profile_image = self.preprocess_image(profile_sample['image'])
+                        profile_raw = self.load_image(profile_ind, profile_meta)
+                        if profile_raw is None:
+                            continue
+                        profile_image = self.preprocess_image(profile_raw)
                         self.seen_profiles.add(profile_ind)
                         self.config.seen_profiles = self.seen_profiles
 
@@ -419,12 +560,16 @@ class DataManager:
                 merged_image = self.merge_images(core_image, profile_image)
 
                 batch.append(merged_image)
-                print(f"Image add with core {self.config.train_ind} and profile {profile_ind} from segment {self.dataset['train'][profile_ind]['segment']}")
+                print(f"Image add with core {self.config.train_ind} and profile {profile_ind}")
 
                 # HF datasets accumulates PIL buffers in process RAM on
                 # repeated indexed access (#4883, #7180). Drop references
                 # eagerly so they're collectable before the next iteration.
-                del sample, profile_sample, core_image, profile_image, merged_image
+                # (`profile_sample` is gone — load_image owns row materialization
+                # now, and the per-row `segment` lookup that used to be inlined in
+                # the log line above was a second full row fetch per pair, i.e. a
+                # second HTTP round trip on the URL-backed image column.)
+                del core_raw, core_image, profile_image, merged_image
 
                 count += 1
             self.config.train_ind += 1
