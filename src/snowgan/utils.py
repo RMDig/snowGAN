@@ -114,8 +114,15 @@ def parse_args():
     parser.add_argument('--dataset_dir', type = str, default = 'rmdig/rocky_mountain_snowpack', help = "Path to the Rocky Mountain Snowpack dataset, if none provided it will download directly from HF remote repository")
     parser.add_argument('--save_dir', type = str, default = "keras/snowgan/", help = "Path to save results where a pre-trained model may be found (defaults to keras/snowgan/)")
     
-    parser.add_argument('--rebuild', action='store_true', default=None, help='Initialize fresh models and IGNORE any saved weights in save_dir (start from scratch over an existing checkpoint dir without archiving it). Defaults to off.')
-    
+    # Boolean flags use BooleanOptionalAction with default=None throughout
+    # (plan 0.1). `default=None` is the resume contract: omitting a flag must
+    # preserve whatever the persisted config says, so a restart-wrapper relaunch
+    # cannot silently flip settings. The old `store_true` form could only ever
+    # turn a flag ON — once a config had been written there was no way to say
+    # "off", which made half of docs/experiments.md's increment queue
+    # unrunnable (its rank-1 entry is literally written `--no-adaptive_steps`).
+    parser.add_argument('--rebuild', action=argparse.BooleanOptionalAction, default=None, help='Initialize fresh models and IGNORE any saved weights in save_dir (start from scratch over an existing checkpoint dir without archiving it). Defaults to off. Never pass this through scripts/train_with_restarts.sh: it replays argv on every restart, so the run would wipe its own weights each relaunch.')
+
     parser.add_argument('--device', type = str, choices = ["cpu", "gpu"], default = "gpu", help = 'Device to run the model on (defaults to gpu)')
     parser.add_argument('--xla', action='store_true', default = False, help = 'Whether to use accelerated linear algebra (XLA) (defaults to False)')
     parser.add_argument('--mixed_precision', action='store_true', default = False, help = 'Use mixed_float16 precision to halve activation VRAM (safe to enable mid-training)')
@@ -124,10 +131,15 @@ def parse_args():
     parser.add_argument('--n_samples', type = int, default = 10, help = "Number of synthetic images to generate (defaults to 10)")
     parser.add_argument('--batch_size', type = int, default = 4, help = 'Batch size (Defaults to 8)')
     parser.add_argument('--epochs', type = int, default = 10, help = 'Epochs to train on (Defaults to 10)')
-    parser.add_argument('--latent_dim', type = float, default = 100, help = 'Latent dimension size (Defaults to 100)')
+    # type=int, not float: the configure_generic assignment lands after
+    # configure()'s int() cast, so a float here reached keras.Input(shape=(100.0,))
+    # and crashed model build (UPGRADES #7).
+    parser.add_argument('--latent_dim', type = int, default = None, help = 'Latent dimension size (Defaults to 100)')
+    parser.add_argument('--seed', type = int, default = None, help = 'RNG seed for weight init, noise sampling and split derivation. Persisted to the config so a resume replays the same stream (defaults to 42).')
+    parser.add_argument('--max_steps', type = int, default = None, help = 'Hard stop after N train steps (global_step). 0 = no cap. Use this to make a gated control run terminate at a defined point rather than relying on a manual kill.')
     parser.add_argument('--cleanup_milestone', type = int, default = 1000, help = 'Frequency (in batches) to save checkpoints and cleanup older batches (Defaults to 1000)')
     # Use None defaults so resume can rely on persisted config unless explicitly overridden
-    parser.add_argument('--fade', type = bool, default = None, help = 'Enable progressive fade-in between resolutions (set True/False to override config)')
+    parser.add_argument('--fade', action=argparse.BooleanOptionalAction, default = None, help = 'Enable progressive fade-in between resolutions. NOTE: fade_steps also offsets the cosine LR schedule even when fade is off (see trainer._update_learning_rates).')
     parser.add_argument('--fade_steps', type = int, default = None, help = 'Steps to ramp alpha from 0 to 1 during fade-in (override config if set)')
 
     parser.add_argument('--gen_checkpoint', type = str, help = 'Path to a pre-trained generator model to load')
@@ -155,19 +167,23 @@ def parse_args():
     parser.add_argument('--disc_filters', type = str, help = 'Discriminator filters per convolution layer (Defaults to [64, 128, 256, 512, 1024])')
 
     # Post-progressive training improvements
-    parser.add_argument('--spectral_norm', action='store_true', default=None, help='Enable spectral normalization on the discriminator')
-    parser.add_argument('--augment', action='store_true', default=None, help='Enable differentiable augmentation during training')
+    parser.add_argument('--spectral_norm', action=argparse.BooleanOptionalAction, default=None, help='Enable spectral normalization on the discriminator. Every run in this repo that produced structure had this OFF with lambda_gp=10; every run that collapsed had it ON with lambda_gp<=1 (see docs/plans/training_dynamics_recovery_plan.md §1.2).')
+    parser.add_argument('--augment', action=argparse.BooleanOptionalAction, default=None, help='Enable differentiable augmentation during training')
+    parser.add_argument('--clamp_gp_under_sn', action=argparse.BooleanOptionalAction, default=None, help='Legacy behavior: silently clamp lambda_gp to 1.0 whenever spectral norm is on. Default OFF. Kept only so pre-2026-09 runs can be reproduced exactly; leaving it off is what makes --disc_lambda_gp 10 expressible under --spectral_norm.')
+    parser.add_argument('--grad_probe_interval', type=int, default=None, help='Steps between unconditional critic input-gradient-norm probes (0 disables). This is the direct read on whether the Lipschitz constraint binds; it is independent of lambda_gp so it survives a spectral-norm-only critic. Defaults to 50.')
     parser.add_argument('--mask_board', action=argparse.BooleanOptionalAction, default=None, help='Mask the blue measurement board out of core photos (HSV threshold -> neutral grey), removing the ruler/text confound so the model learns snow structure. Must be mirrored in the on-device phone pipeline. Default: off. See docs/UPGRADES.md #49.')
-    parser.add_argument('--lr_decay', type=str, default=None, choices=['cosine'], help='Learning rate decay schedule (e.g. "cosine")')
+    parser.add_argument('--lr_decay', type=str, default=None, choices=['cosine', 'none'], help='Learning rate decay schedule. "none" explicitly disables it — omitting the flag preserves whatever the persisted config says, which is not the same thing.')
     parser.add_argument('--lr_min', type=float, default=None, help='Minimum learning rate for LR decay (Defaults to 1e-7)')
     parser.add_argument('--lr_decay_steps', type=int, default=None, help='Cosine decay horizon in steps. Set to the planned run length so LRs reach lr_min at end-of-training, not partway through (0/unset = long-horizon fallback)')
     parser.add_argument('--ema_decay', type=float, default=None, help='EMA decay for generator shadow weights (e.g. 0.999, 0 to disable)')
     parser.add_argument('--fid_interval', type=int, default=None, help='Steps between FID evaluations (0 to disable)')
-    parser.add_argument('--multiscale_disc', action='store_true', default=None, help='Enable multi-scale discriminator (adds 256x256 head)')
+    parser.add_argument('--multiscale_disc', action=argparse.BooleanOptionalAction, default=None, help='Enable multi-scale discriminator (adds a 256x256 head). NOTE: that head trains with no gradient penalty and never reaches the generator, but its loss is folded into the logged disc_loss — and at --resolution "256 256" its resize is a no-op, so it becomes a second full-resolution critic.')
     parser.add_argument('--grad_clip_norm', type=float, default=None, help='Global gradient norm clipping (0 to disable)')
     parser.add_argument('--max_rss_mb', type=float, default=None, help='Process RSS ceiling in MiB. When exceeded, the trainer saves a fresh checkpoint and exits with code 75 so a restart wrapper relaunches a clean process (workaround for the native CPU-RAM leak that OOM-kills long runs). 0/unset disables.')
     parser.add_argument('--ada_target', type=float, default=None, help='ADA target disc accuracy on reals (e.g. 0.6, 0 to disable)')
-    parser.add_argument('--adaptive_steps', action='store_true', default=None, help='Enable adaptive disc/gen training step ratio')
+    parser.add_argument('--adaptive_steps', action=argparse.BooleanOptionalAction, default=None, help='Enable adaptive disc/gen training step ratio. NOT reproducible: it persists its adjustment into training_steps, which is re-read as the new base on the next launch, so the ratio ratchets across restarts (2 -> 61 in the released magnified_profiles run). Leave off for any run you intend to interpret.')
+    parser.add_argument('--image_root', type=str, default=None, help='Local directory mirroring the dataset, keyed by the manifest file_path column (e.g. ~/rmdig-cache-512). The HF image column is URL-backed and costs ~2 s of HTTP per image per epoch, which makes the data pipeline ~97%% of a 1024px train step; a local root cuts that to ~0.007 s. Rows missing locally fall back to the remote column.')
+    parser.add_argument('--honor_splits', action=argparse.BooleanOptionalAction, default=None, help='Exclude validation_pool / test_pool groups from the training stream. Default ON. Runs before 2026-09 trained on their own test_pool, which invalidates any downstream transfer probe; --no-honor_splits reproduces that old behavior.')
 
     # Modality selection: which depth-axis arrangement the trainer feeds the
     # GAN. "magnified_profile" / "core" / "profile" / "crystal_card" produce
