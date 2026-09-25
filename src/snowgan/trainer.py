@@ -1394,6 +1394,12 @@ class Trainer:
                 continue
             try:
                 cfg.fade_step = target_step
+                # Mirrored with fade_step because it is resume state in the same
+                # sense (CLAUDE.md §5): gates are expressed in critic updates, so
+                # a counter that silently restarts at 0 on resume moves every
+                # gate. Initializing it from config without ever writing it back
+                # made the "accumulated, not derived" fix a no-op across restarts.
+                cfg.critic_updates = int(self.critic_updates)
                 if gen_cfg is not None and cfg is not gen_cfg and hasattr(cfg, 'fade_steps') and hasattr(gen_cfg, 'fade_steps'):
                     if cfg.fade_steps != gen_cfg.fade_steps:
                         cfg.fade_steps = gen_cfg.fade_steps

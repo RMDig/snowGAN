@@ -100,6 +100,20 @@ def test_critic_updates_is_resume_state(tmp_path):
     assert cfg.dump()["critic_updates"] == 4242
 
 
+def test_critic_updates_is_mirrored_onto_the_config_for_persistence():
+    """Initializing the counter from config without ever writing it back made
+    the whole 'accumulated, not derived' fix a no-op across restarts: the
+    persisted value stayed 0, so every resume restarted the gate axis. Caught
+    empirically — a restart test reached 438 critic updates and persisted 0."""
+    import inspect
+    from snowgan.trainer import Trainer
+
+    source = inspect.getsource(Trainer._sync_fade_progress)
+    assert "critic_updates" in source, (
+        "_sync_fade_progress must mirror critic_updates alongside fade_step, "
+        "or the counter resets to 0 on every resume")
+
+
 def test_critic_updates_defaults_for_legacy_configs(tmp_path):
     data = copy.deepcopy(config_template)
     data.pop("critic_updates")
