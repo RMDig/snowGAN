@@ -71,13 +71,13 @@ break the checkpoint format).
    diff is a cheaper-but-weaker fallback: identifies the growing region, not the
    caller.)
 
-1. **Double-applied gradient penalty.**
-   [losses.py:55](../src/snowgan/losses.py#L55) returns `mean((‖∇‖−1)²) · λ`. Then
-   [models/discriminator.py:63](../src/snowgan/models/discriminator.py#L63) adds
-   `λ · gp` a second time. Effective penalty = `λ² · mean((‖∇‖−1)²)` (100× at λ=10).
-   Fix: either return the raw `mean((‖∇‖−1)²)` from `compute_gradient_penalty` and multiply
-   once in the loss, or stop multiplying in the loss. Add a unit test that asserts the
-   penalty magnitude for a known input.
+1. ~~**Double-applied gradient penalty.**~~
+   **Resolved — verified 2026-09-23.** `compute_gradient_penalty` returns the *unscaled*
+   `mean((‖∇‖−1)²)` and `Discriminator.get_loss` multiplies by λ exactly once. This entry
+   had been sitting open as 🔴 against code that no longer had the defect. Regression
+   coverage added:
+   `tests/unit/test_lipschitz_instrument.py::test_gradient_penalty_is_applied_exactly_once`
+   pins a known ‖∇‖=3 critic to penalty 4.0 and loss 40.0 at λ=10 (not 400).
 
 2. ~~**`_ensure_depth_alignment` silently discards trained weights.**~~
    **Resolved 2026-05-09 (PR #12).** `DataManager.PAIR_DEPTH = 2` is now the
@@ -102,28 +102,37 @@ break the checkpoint format).
    env, and only then lets the rest of the package import TF. Invoke it first in the
    console-script entry.
 
-5. **`--resolution` flag is dead.**
-   [utils.py:97](../src/snowgan/utils.py#L97) declares `type=set` — argparse cannot build a
-   set from a single string. The flag accepts input but silently discards it. Replace with
-   `nargs=2, type=int` or `type=parse_resolution` where the parser splits `"1024x1024"`.
+5. ~~**`--resolution` flag is dead.**~~
+   **Resolved 2026-07-17.** Was `type=set`, so `--resolution "256 256"` became the
+   character set `{'2','5','6',' '}` and the requested size was silently discarded (the
+   config kept its 1024 default → guaranteed real/fake size mismatch on any low-res run).
+   Now `type=str`, split on whitespace into `[int, int]`, mirroring `--gen_kernel`.
+   Regression test: `tests/unit/test_resolution_cli.py`.
 
-6. **Boolean CLI flags accept any truthy string.** 🔴 PARTIAL.
-   `--fade`, `--xla`, `--mixed_precision`, `--rebuild`, `--gen_norm` all use `type=bool`.
-   `--fade False` evaluates to `True`. Swap to `argparse.BooleanOptionalAction` (py ≥ 3.9)
-   for `--fade / --no-fade` semantics.
+6. ~~**Boolean CLI flags accept any truthy string.**~~
+   **Resolved 2026-09-23** — and the entry understated the problem. Beyond `--fade`'s
+   `type=bool`, five flags (`--spectral_norm`, `--augment`, `--multiscale_disc`,
+   `--adaptive_steps`, `--rebuild`) were `action='store_true', default=None`, so they
+   could only ever be turned **on**: once a value was persisted, no command line could
+   turn it off. That made half of [experiments.md](experiments.md)'s increment queue
+   unrunnable — its rank-1 entry is written `--no-adaptive_steps`, a flag that did not
+   exist — and it is why several runs carried settings nobody intended. All six now use
+   `argparse.BooleanOptionalAction` with `default=None` (the resume contract: omission
+   preserves the persisted value, because the restart wrapper replays argv on every
+   relaunch). `--rebuild` and `--fade` also had truthiness-guarded application sites in
+   `configure_generic` that would have swallowed `False`; both are now `is not None`.
+   `--lr_decay` gained an explicit `none` choice for the same reason. Regression coverage:
+   `tests/unit/test_boolean_cli_flags.py` (37 cases — each flag's on/off/omitted
+   behavior).
 
-   **`--adaptive_steps` converted 2026-07-16** (see #46). It exposed a second, worse
-   variant of this bug that the `type=bool` framing misses: a `store_true` flag whose
-   value **persists into the config** is write-only. Omitting it means "no override",
-   so a saved `True` can never be cleared from the CLI — only by hand-editing the JSON.
-   `--spectral_norm`, `--augment`, `--multiscale_disc`, and `--rebuild` are all
-   `store_true` + persisted and still have this trap. They deserve the same treatment;
-   left out here to keep #46's diff scoped to the ratchet.
-
-7. **`latent_dim` is typed `float` but used as int.**
-   [utils.py:101](../src/snowgan/utils.py#L101) → `type=float`. `config.latent_dim = int(...)`
-   downstream works but `args.latent_dim` is a float. Risk: `tf.random.normal([B, 100.0])`
-   is not accepted in strict TF builds. Type as `int`.
+7. ~~**`latent_dim` is typed `float` but used as int.**~~
+   **Resolved 2026-09-23** — and it was worse than "risk". `configure_generic` assigned
+   the raw arg *after* `configure()`'s `int()` cast, so passing `--latent_dim` left
+   `100.0` on the config and it reached `keras.Input(shape=(100.0,))`. It had never bitten
+   only because no script in the repo passed the flag. Now `type=int` with an `int()` cast
+   at the assignment. `--seed` was also added: it existed in the config schema and was
+   read by `main.py`, but had **no CLI flag at all**, so the reproducibility story had no
+   command-line surface.
 
 32. **Stale trainer-owned optimizers are never used.**
     [trainer.py:75-81](../src/snowgan/trainer.py#L75-L81) constructs
@@ -234,6 +243,220 @@ break the checkpoint format).
     leak **per-train-step, not per-batch**. If so, the flat `bench_disc_loop.py` result
     may simply have run too few inner steps to show slope. Worth pinning the step count
     as an axis in the next heap-profiler run before trusting any per-batch figure.
+
+## Tier 🟠 — production readiness (do before calling this a product)
+
+49. **Blue measurement-board masking for the core modality** (`--mask_board`, added
+    2026-07-25). Core photos are a snow sample on a blue ruler board; the board, ruler,
+    and printed "Centimeters" text dominate every frame and are a confound for the
+    downstream avalanche-risk transfer task. Every core GAN run collapsed onto the board
+    (it is the most consistent, learnable structure), so the discriminator learned a
+    blue-board detector — useless as a transfer backbone. Diagnosed by finally *looking*
+    at a real core image (should have been step one).
+
+    Fix: `mask_blue_board` (in `data/dataset.py`) zeroes the chromatic-blue board to
+    neutral grey via an HSV rule. The board hue is lighting-stable — measured peak
+    168-172 on PIL's 0-255 scale across a 10-image spread of the whole split, spread of
+    4 — because lighting moves brightness (value), not hue; an RGB threshold would not
+    generalize. Snow is achromatic (low saturation) and survives. Verified on the hard
+    case (loose snow, no column, ruler present): board + ruler removed, snow structure
+    kept. Runs identically in training and the on-device phone pipeline (per-pixel
+    arithmetic, no accelerator needed), so both ends see the same input.
+
+    **UNCERTAINTY — grey vs black fill (revisit if masked runs underperform).** Masked
+    board pixels are filled with **neutral grey** (127.5 → 0.0 after the /127.5-1 rescale,
+    the centre of tanh's linear region). This is a *reasoned default, not a validated
+    one*: grey removes the confound WITHOUT handing the generator a large flat region at
+    a tanh rail, which **black** (→ -1) would — and re-inviting a rail is precisely the
+    saturation failure (#47/#48) we just escaped. But grey has not been shown superior
+    for *feature transfer*; it is possible black (or per-image snow-mean) transfers
+    better despite the rail risk, or that the fill choice barely matters. If masked
+    training still degrades — collapse, or poor downstream probe accuracy — **try black
+    as the documented fallback** before assuming masking itself failed. The fill value
+    lives in one constant (`_BOARD_FILL_255`) to make the swap a one-line change.
+
+### Found by the 2026-09-22 training-dynamics audit
+
+Full write-up and the campaign that acts on them:
+[plans/training_dynamics_recovery_plan.md](plans/training_dynamics_recovery_plan.md).
+
+52. ~~**The silent λ_gp clamp.**~~ **Resolved 2026-09-23.** `Trainer.__init__` rewrote
+    `lambda_gp → 1.0` whenever `spectral_norm` was on, then persisted it — so the config
+    stopped describing the run, and `lambda_gp > 1` became **inexpressible** under SN.
+    That matters because λ_gp is the one variable separating every run in this repo that
+    produced structure (≥10, SN off) from every run that collapsed (≤1, SN on). Now
+    opt-in via `clamp_gp_under_sn` / `--clamp_gp_under_sn`, with the decision extracted to
+    the testable `Trainer._resolve_lambda_gp`.
+
+53. ~~**No Lipschitz instrument.**~~ **Resolved 2026-09-23.** `compute_gradient_penalty`
+    computed the critic's input-gradient norm — the quantity the penalty exists to drive
+    to 1.0 — and discarded it, while `disc_loss` conflated the Wasserstein term with
+    `λ·GP` (plus `0.5·W_lowres` when multiscale is on). So **no verdict in
+    [experiments.md](experiments.md) was ever reached with a number that meant what it was
+    read to mean.** Added `losses.critic_input_gradient_norm` as a standalone probe —
+    deliberately *not* a by-product of the penalty, because the train step skips the
+    penalty entirely at `lambda_gp == 0`, i.e. the instrument would vanish in exactly the
+    SN-only arm whose question it answers. It runs on its own cadence
+    (`--grad_probe_interval`), with its own `tf.random.Generator` so instrumentation
+    cannot perturb the training stream, and with `training=False` so it cannot advance the
+    critic's spectral-norm power iteration.
+
+54. ~~**Training ignored the persisted splits.**~~ **Resolved 2026-09-23.**
+    `derive_splits` partitioned groups 80/10/10 and `Trainer` mirrored the pools onto both
+    configs specifically so AvAI could evaluate against `test_pool` — but `batch()`
+    filtered on `datatype` alone and no batch path ever consulted them. **The GAN trained
+    on its own test pool**, which invalidates the downstream transfer probe CLAUDE.md §9
+    calls "the real metric", for both released backbones. Now gated on `honor_splits`
+    (default **on**; `--no-honor_splits` reproduces the old stream). Excludes
+    validation+test rather than filtering *to* `trained_pool`, because the pools derive
+    from `pair_index` and filtering to them would silently discard every unpaired group.
+
+55. **DiffAugment is not applied in the generator step.** 🔴 OPEN. The critic update
+    augments real and fake ([trainer.py:711-712](../src/snowgan/trainer.py#L711)); the
+    generator update feeds raw fakes at
+    [trainer.py:786](../src/snowgan/trainer.py#L786). The critic therefore trains on one
+    distribution and the generator optimizes against it on another, which defeats the
+    point of *differentiable* augmentation. `--augment` was on in every run in the
+    forensic table. Separately, `augment.py` has no **translation**, DiffAugment's
+    strongest component for small data. Deferred to the increment queue rather than fixed
+    here: it changes the gradient the generator receives, so under the plan's §2 rule it
+    is an increment, not a fix.
+
+56. ~~**`adaptive_steps` ratchets across restarts.**~~ **Already resolved on `main` by
+    #46 (PR #30, merged 2026-08-18) — this entry was written against a stale branch.**
+    The audit rediscovered the ratchet independently and proposed mitigating it via the
+    CLI; #46's fix is better and is the one in effect: the live counts
+    (`Trainer._disc_steps` / `._gen_steps`) are runtime-only and `config.training_steps`
+    is never written during training, so the launch parameter and the live counter can no
+    longer be conflated. `--no-adaptive_steps` (also from PR #30) makes a persisted
+    `true` clearable.
+
+    Retained here only for the forensic point it anchors: the released
+    `magnified_profiles` config records `disc_steps 47` because of this ratchet, which is
+    why that number must not be read as a deliberate recipe choice. See the correction in
+    [experiments.md](experiments.md).
+57. **The multiscale critic is nearly inert but contaminates the loss.** 🟠 OPEN. The
+    low-res head trains with a bare `mean(fake) − mean(real)` and **no gradient penalty**
+    ([trainer.py:747-767](../src/snowgan/trainer.py#L747)), its gradient reaches only its
+    own variables, and the generator loss reads `self.disc.model` alone — so it never
+    influences the generator. But `0.5 × disc_loss_lr` is folded into the logged
+    `disc_loss`. And `_build_lowres_disc` hard-codes a 256×256 input, so at
+    `--resolution "256 256"` its resize is a no-op and it becomes a second
+    full-resolution critic.
+
+58. ~~**FID: non-symmetric `eigh`, hardcoded modality, unguarded EMA swap.**~~
+    **Partly resolved 2026-09-23.** `np.linalg.eigh(sigma_r @ sigma_f)` was computing
+    eigenvalues of a different matrix — the product of two symmetric PSD matrices is not
+    itself symmetric, and `eigh` reads only the lower triangle — so the result was not a
+    monotone transform of FID. Replaced with the similarity-transform form
+    `sqrt(Σr) Σf sqrt(Σr)`, which is symmetric PSD and shares the eigenvalues. The
+    hardcoded `'magnified_profile'` (which scored every core/merged run against the wrong
+    modality) now follows `config.modality`, and the EMA swap is wrapped in `try/finally`
+    — it was the one swap site without it, so a failure left the generator permanently
+    holding EMA weights while training silently continued. **Still open:** n=64 against
+    2048-dim Inception features is rank-deficient and strongly biased (Chong & Forsyth
+    2020); the reference reals are drawn from the live training pointer. Use KID
+    (Bińkowski 2018) on a held-out pool. Until then, run with `--fid_interval 0`.
+
+60. ~~**The dataset's `image` column is URL-backed: one HTTP GET per image, per epoch.**~~
+    **Resolved 2026-09-23 (`--image_root`).** This was the single largest throughput
+    defect in the repo and it masqueraded as "training is slow / the GPU is weak".
+
+    `dataset['train'][i]['image']` does not read a local file — the HF manifest stores
+    `https://huggingface.co/datasets/RMDig/.../preprocessed/magnified_profiles/image_N.png`,
+    so **every access downloads a ~16 MB PNG**, once per image per epoch, and the source
+    images are 3024×4032 (12 MP) that get immediately downsampled. Measured:
+
+    | path | per image | 1024² train step |
+    |---|---|---|
+    | HF `image` column (HTTP) | **2.03 s** | **16.8 s/step** |
+    | local mirror (512 px) | **0.007 s** | **0.87 s/step** (at 512²) |
+    | GPU compute alone (synthetic data, 1024²) | — | **0.537 s/step** |
+
+    So the data pipeline was **~97% of a train step** and the GPU sat idle. UPGRADES #51
+    noted the HTTP cost in passing as "a distinct, larger issue not addressed here"; this
+    is it. It also explains why the historical `batch_*` mtimes imply ~7 s/batch and why
+    the recovery plan's first cost model was ~13× pessimistic — those runs were paying for
+    network, not arithmetic.
+
+    Fix: `config.image_root` / `--image_root` resolves `<root>/<manifest file_path>` and
+    never touches the network. Rows missing locally fall back to the remote column, so a
+    partial mirror costs speed, not correctness; a corrupt local file warns and falls back
+    rather than killing a long run. `DataManager.load_image` is the single entry point for
+    both batch paths. Regression coverage: `tests/unit/test_image_root.py`.
+
+    Also removed in the same change: `batch_merged`'s log line called
+    `self.dataset['train'][profile_ind]['segment']`, a **second full row fetch per pair**
+    — i.e. a second HTTP round trip purely to print a field.
+
+    **Still open:** this is a mirror, not a pipeline. UPGRADES #10 (`tf.data` with
+    prefetch/parallel map/cache) remains the real fix, and no mirror exists at full
+    resolution — `~/rmdig-cache-512` has all 2,350 magnified_profile images at 512 px,
+    while the 53 GB `data/rmsnow` clone has only 1,355 at full resolution.
+
+61. ~~**Config schema was not forward-compatible.**~~ **Resolved 2026-09-23.**
+    `build.configure` is called as `configure(**config_json)` with a closed keyword
+    list, so a sidecar written by a NEWER snowgan raised `TypeError` on an OLDER one.
+    This is a cross-repo break, not a theoretical one: snowGradient pins
+    `snowgan @ git+...@main` (a mutable ref) and calls `build()` on
+    `discriminator_config.json` directly, so any environment installed before a schema
+    change fails at backbone load. `configure` now accepts `**unknown_fields`, keeps
+    them on the instance, and re-emits them from `dump()` so an old reader cannot
+    silently strip a field it does not understand. Tests in
+    `tests/unit/test_review_fixes.py`.
+
+62. ~~**`save_config` was not atomic, and still ran at `atexit`.**~~
+    **Resolved 2026-09-23 (partial — UPGRADES #34).** `generator_config.json` holds
+    `fade_step`, which is the **only** source of `global_step` on resume, plus
+    `train_ind` and the split pools. It was written with a plain `open(..., 'w')`, and
+    `load_config` has no guard around `json.load` — so a signal during that write
+    truncated the file and the next launch died with `JSONDecodeError`, the restart
+    wrapper saw a non-75 exit, and a long run stopped permanently. It was the one
+    failure mode in an unattended run that did not self-heal. Now `tmp + os.replace()`,
+    matching `_atomic_save_weights`. **Still open:** the `atexit` registration itself
+    (`config.py`), which is why a run's config is timestamped minutes after its weights.
+
+63. ~~**`max_steps` was checked after the step, so re-entry was not idempotent.**~~
+    **Resolved 2026-09-23.** Re-invoking a finished capped run performed one more real
+    gradient update, overwrote the final checkpoint with an N+1-step model, and left
+    `check_gates.py` evaluating a one-record window (`read_last_launch` filters to the
+    final `launch_id`). The check now also runs at the top of the loop.
+
+64. ~~**`critic_updates` was derived, not counted.**~~ **Resolved 2026-09-23.** It was
+    `global_step * disc.config.training_steps`, which re-attributes the whole run
+    history to whatever ratio is current — wrong after any resume with a different
+    `--disc_steps`, and badly wrong under `adaptive_steps` (2 → 61 in the released run).
+    Gates are expressed on this axis, so a rescaled axis silently moves every gate. Now
+    accumulated per step and persisted as resume state.
+
+65. ~~**The `clamp_gp_under_sn` path still destroyed `lambda_gp`.**~~
+    **Resolved 2026-09-23.** Making the clamp opt-in did not make it non-destructive:
+    it still assigned `1.0` onto `disc.config.lambda_gp`, `dump()` persisted it, and the
+    user's `10.0` was unrecoverable. The resolved value now lives on the trainer and the
+    config is left alone.
+
+66. **`_cleanup_saved_batches` is a no-op at the default cadence.** 🟠 OPEN.
+    `trainer.py` calls it with `keep_every=100` while snapshots are only written every
+    `cleanup_milestone` (1000) steps — so every existing `batch_N` is a multiple of 100
+    and nothing is ever removed. Because the preview trim is nested inside the removal
+    branch, **no synthetic image is ever trimmed either**. Measured at 10k steps: a
+    snapshot dir is 348 MB (including a 167 MB `generator_fade_endpoints.weights.h5`
+    written even when `fade: false`) and `synthetic_images/` was 1,990 files / 1015 MB.
+    At 100k steps that projects to ~45 GB and ~20k files in one run directory.
+    Separately the trim logic is inverted — `indexed_images[-7:]` deletes the seven
+    newest rather than keeping them.
+
+67. **Preview PNGs are named by `batch`, which rewinds on restart.** 🟡 OPEN.
+    `batch` is recovered by globbing snapshot dirs, so it rewinds to the last multiple
+    of `cleanup_milestone`; previews named `batch_{batch}_synthetic` therefore replay
+    and overwrite earlier images with ones from a LATER training state. CLAUDE.md §9's
+    scoreboard item 2 is "open `synthetic_images/*.png`" — that timeline is non-monotone
+    across a restart with nothing saying so. Name previews by `global_step`.
+
+59. **The critic runs with `training=True` during the generator step.** 🟡 OPEN.
+    [trainer.py:786](../src/snowgan/trainer.py#L786) advances the spectral-norm power
+    iteration outside critic training; `losses.compute_gradient_penalty` does too. Low
+    expected impact, listed so it is not rediscovered.
 
 ## Tier 🟠 — production readiness (do before calling this a product)
 

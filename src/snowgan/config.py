@@ -92,6 +92,7 @@ config_template = {
             "batch_norm": False,
             "gen_norm": None,
             "gen_upsampler": "resize",
+            "gen_convs_per_resolution": 2,
             "final_activation": "tanh",
             "zero_padding": None,
             "padding": "same",
@@ -107,6 +108,7 @@ config_template = {
             "cleanup_milestone": 1000,
             "spectral_norm": False,
             "augment": False,
+            "mask_board": False,
             "lr_decay": None,
             "lr_min": 1e-7,
             "lr_decay_steps": 0,
@@ -117,6 +119,40 @@ config_template = {
             "max_rss_mb": 0,
             "ada_target": 0.0,
             "adaptive_steps": False,
+            # Silent-mutation guard (plan 0.2). Historically the trainer
+            # rewrote lambda_gp -> 1.0 whenever spectral_norm was on, with no
+            # way to opt out — which made lambda_gp=10 inexpressible under SN,
+            # and lambda_gp is the one variable separating every run that
+            # produced structure from every run that did not. Default off:
+            # honour what the caller asked for, and say so in the log.
+            "clamp_gp_under_sn": False,
+            # Steps between unconditional critic-input-gradient-norm probes
+            # (plan 0.3). 0 disables. Independent of lambda_gp by design.
+            "grad_probe_interval": 50,
+            # Hard stop after N train steps (global_step). 0 = no step cap.
+            # Lets a gated control run terminate at a defined point instead of
+            # relying on the non-terminating epoch loop plus a manual kill.
+            "max_steps": 0,
+            # Exclude validation_pool / test_pool groups from the training
+            # stream (plan 0.5a). Default on: training on the held-out pools
+            # invalidates the downstream probe CLAUDE.md §9 calls the real metric.
+            "honor_splits": True,
+            # Local mirror of the dataset images. The HF `image` column is
+            # URL-backed (one HTTP GET per image per epoch, ~2 s each); pointing
+            # this at a local tree keyed by the manifest's `file_path` makes the
+            # data pipeline ~290x faster. None = use the remote column.
+            "image_root": None,
+            # Accumulated critic updates (resume state, CLAUDE.md §5). Gates are
+            # expressed on this axis, so it must survive a restart.
+            "critic_updates": 0,
+            # HF dataset commit SHA the run trained against, and the snowgan
+            # version that wrote this sidecar. Both exist because reconstructing
+            # "which manifest did this backbone see?" otherwise requires
+            # inferring it from the pool contents -- which is exactly what
+            # snowGradient had to do in Sept 2026 to establish that the v0.1.0
+            # backbones predate sites 3-6. A lookup beats an inference.
+            "dataset_revision": None,
+            "snowgan_version": None,
             "seed": 42,
             "modality": "magnified_profile",
             "sample_epoch_interval": 1,
@@ -124,8 +160,18 @@ config_template = {
 }
 
 class build:
-    def __init__(self, config_filepath):
+    def __init__(self, config_filepath, autosave=False):
+        """Load a config.
+
+        Args:
+            config_filepath: path to the JSON sidecar.
+            autosave: register an ``atexit`` hook that writes this config back
+                to ``config_filepath`` on process exit. **Default False.** Only
+                a process that owns the file (i.e. the trainer) should pass
+                True; a reader that merely loads a sidecar must not rewrite it.
+        """
         self.config_filepath = config_filepath
+        self._autosave_registered = False
         if os.path.exists(config_filepath): # Try and load config if folder passed in
             print(f"Loading config file: {self.config_filepath}")
             config_json = self.load_config(self.config_filepath)
@@ -140,6 +186,19 @@ class build:
         config_json.setdefault("seed", 42)
         config_json.setdefault("sample_epoch_interval", 1)
         config_json.setdefault("sample_batch_interval", 0)
+        # Fields added by the training-dynamics recovery plan. Legacy configs
+        # predate them; defaulting here keeps old save_dirs loadable. Note
+        # honor_splits defaults True even for legacy configs — it is a validity
+        # fix (the GAN was training on its own test_pool), and the plan accepts
+        # that it breaks comparability with runs that were already invalid.
+        config_json.setdefault("clamp_gp_under_sn", False)
+        config_json.setdefault("grad_probe_interval", 50)
+        config_json.setdefault("max_steps", 0)
+        config_json.setdefault("honor_splits", True)
+        config_json.setdefault("image_root", None)
+        config_json.setdefault("critic_updates", 0)
+        config_json.setdefault("dataset_revision", None)
+        config_json.setdefault("snowgan_version", None)
         # Infer the modality mode from the existing depth on legacy configs.
         # Pre-#6 (single-modality, depth=1) configs are profile training; post-#6
         # configs (silent rebuild → depth=2) are merged. New configs default to
@@ -149,12 +208,41 @@ class build:
 
         self.configure(**config_json) # Build configuration
 
-        atexit.register(self.save_config)
+        # Opt-in, not automatic (snowGradient 2026-09-25).
+        #
+        # `save_config` writes back to `self.config_filepath`. Registering that
+        # at exit for EVERY build() means a read-only consumer rewrites the very
+        # sidecar it loaded -- and snowGradient loads released sidecars straight
+        # out of the shared HuggingFace cache, then sets `resolution_override`
+        # for its probes. The result, verified empirically on their side, is a
+        # released artifact silently rewritten from [1024,1024] to [64,64] in a
+        # cache shared by every consumer on the machine.
+        #
+        # They defend against it with `atexit.unregister(cfg.save_config)`, which
+        # works but is a silent no-op the moment this registration becomes a
+        # lambda, a functools.partial, or a renamed method. A library that
+        # rewrites its input file on exit is surprising for any read-only
+        # reader, so the default is now off: the trainer opts in explicitly,
+        # everyone else gets a plain reader.
+        if autosave:
+            self.enable_autosave()
 
         
     def __repr__(self):
         return '\n'.join([f"{key}: {value}" for key, value in self.__dict__.items()])
     
+    def enable_autosave(self):
+        """Register the atexit write-back. Idempotent."""
+        if not self._autosave_registered:
+            atexit.register(self.save_config)
+            self._autosave_registered = True
+
+    def disable_autosave(self):
+        """Unregister the atexit write-back. Idempotent and safe if never registered."""
+        if self._autosave_registered:
+            atexit.unregister(self.save_config)
+            self._autosave_registered = False
+
     def save_config(self, config_filepath = None):
         # Save the config filepath if passed in
         if config_filepath: self.config_filepath = config_filepath
@@ -163,8 +251,25 @@ class build:
         dest_dir = os.path.dirname(self.config_filepath) or "."
         os.makedirs(dest_dir, exist_ok=True)
 
-        with open(self.config_filepath, 'w') as config_file:
-            json.dump(self.dump(), config_file, indent = 4)
+        # Atomic write (CLAUDE.md §4, UPGRADES #34). This file holds `fade_step`,
+        # which is the ONLY source of global_step on resume, plus train_ind and
+        # the split pools. A signal during a plain `open(...,'w')` truncates it,
+        # and `build.load_config` has no guard around json.load — so the next
+        # launch dies with JSONDecodeError, the restart wrapper sees a non-75
+        # exit and stops permanently. It is the one failure in a long unattended
+        # run that does not self-heal.
+        directory, base = os.path.split(self.config_filepath)
+        tmp_path = os.path.join(directory or ".", f"._tmp_{base}")
+        try:
+            with open(tmp_path, 'w') as config_file:
+                json.dump(self.dump(), config_file, indent = 4)
+            os.replace(tmp_path, self.config_filepath)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
              
     def load_config(self, config_path):
         if os.path.exists(config_path):
@@ -174,7 +279,22 @@ class build:
             config_json = config_template
         return config_json
 
-    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0):
+    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", gen_convs_per_resolution=2, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, mask_board=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0, clamp_gp_under_sn=False, grad_probe_interval=50, max_steps=0, honor_splits=True, image_root=None, critic_updates=0, dataset_revision=None, snowgan_version=None, **unknown_fields):
+        # Forward compatibility. `configure` is called as `configure(**config_json)`,
+        # so without this a config written by a NEWER snowgan raises TypeError on an
+        # OLDER one — and the sidecars are a cross-repo contract: snowGradient pins
+        # `snowgan @ git+...@main` (a mutable ref) and calls `build()` on
+        # discriminator_config.json directly, so a stale install would fail at
+        # backbone load, not at import. Unknown keys are kept on the instance so a
+        # round-trip through dump() does not silently drop a field this version
+        # does not understand.
+        if unknown_fields:
+            print(f"Config contains {len(unknown_fields)} field(s) unknown to this "
+                  f"snowgan version, preserved as-is: {sorted(unknown_fields)}")
+            self._unknown_fields = dict(unknown_fields)
+            for key, value in unknown_fields.items():
+                if not hasattr(self, key):
+                    setattr(self, key, value)
 		# Process lists
         if isinstance(filter_counts, str):
             filter_counts = [int(datum) for datum in filter_counts.split(' ')]
@@ -228,6 +348,8 @@ class build:
         # Generator upsampler: "resize" (UpSampling+conv, no checkerboard but
         # low-pass) or "transpose" (learned Conv3DTranspose, recovers detail).
         self.gen_upsampler = str(gen_upsampler) if gen_upsampler else "resize"
+        # Convs per resolution block; 1 = the proven pre-audit shallow stack.
+        self.gen_convs_per_resolution = max(1, int(gen_convs_per_resolution or 2))
         self.final_activation = final_activation or "tanh"
         self.zero_padding = zero_padding or None
         self.padding = padding or "same"
@@ -253,6 +375,7 @@ class build:
         # Post-progressive training improvements
         self.spectral_norm = bool(spectral_norm)
         self.augment = bool(augment)
+        self.mask_board = bool(mask_board)
         self.lr_decay = lr_decay  # "cosine" or None
         self.lr_min = float(lr_min) if lr_min is not None else 1e-7
         # Cosine decay horizon. 0 means "unset" — the trainer falls back to a
@@ -267,6 +390,17 @@ class build:
         self.max_rss_mb = float(max_rss_mb) if max_rss_mb else 0.0
         self.ada_target = float(ada_target) if ada_target else 0.0
         self.adaptive_steps = bool(adaptive_steps)
+        self.clamp_gp_under_sn = bool(clamp_gp_under_sn)
+        self.grad_probe_interval = int(grad_probe_interval) if grad_probe_interval is not None else 50
+        self.max_steps = int(max_steps) if max_steps else 0
+        self.honor_splits = bool(honor_splits) if honor_splits is not None else True
+        self.image_root = str(image_root) if image_root else None
+        self.critic_updates = int(critic_updates) if critic_updates else 0
+        self.dataset_revision = str(dataset_revision) if dataset_revision else None
+        # Stamped with the running version, not the loaded one: this records who
+        # last wrote the file, which is the question a schema mismatch asks.
+        from snowgan import __version__ as _snowgan_version
+        self.snowgan_version = _snowgan_version
         self.seed = int(seed) if seed is not None else 42
         self.modality = str(modality) if modality else "magnified_profile"
         self.sample_epoch_interval = int(sample_epoch_interval) if sample_epoch_interval is not None else 1
@@ -308,6 +442,7 @@ class build:
             "batch_norm": self.batch_norm,
             "gen_norm": self.gen_norm,
             "gen_upsampler": self.gen_upsampler,
+            "gen_convs_per_resolution": self.gen_convs_per_resolution,
             "final_activation":self.final_activation,
             "zero_padding": self.zero_padding,
             "padding": self.padding,
@@ -323,6 +458,7 @@ class build:
             "cleanup_milestone": self.cleanup_milestone,
             "spectral_norm": self.spectral_norm,
             "augment": self.augment,
+            "mask_board": self.mask_board,
             "lr_decay": self.lr_decay,
             "lr_min": self.lr_min,
             "lr_decay_steps": self.lr_decay_steps,
@@ -333,11 +469,23 @@ class build:
             "max_rss_mb": self.max_rss_mb,
             "ada_target": self.ada_target,
             "adaptive_steps": self.adaptive_steps,
+            "clamp_gp_under_sn": self.clamp_gp_under_sn,
+            "grad_probe_interval": self.grad_probe_interval,
+            "max_steps": self.max_steps,
+            "honor_splits": self.honor_splits,
+            "image_root": self.image_root,
+            "critic_updates": self.critic_updates,
+            "dataset_revision": self.dataset_revision,
+            "snowgan_version": self.snowgan_version,
             "seed": self.seed,
             "modality": self.modality,
             "sample_epoch_interval": self.sample_epoch_interval,
             "sample_batch_interval": self.sample_batch_interval
         }
+        # Re-emit fields this version didn't recognize, so an older snowgan
+        # reading and rewriting a newer sidecar doesn't silently strip it.
+        for key, value in getattr(self, "_unknown_fields", {}).items():
+            config.setdefault(key, getattr(self, key, value))
         return config
 
 
@@ -369,6 +517,8 @@ def configure_gen(config, args):
     if args.gen_stride: config.kernel_stride = [int(datum) for datum in args.gen_stride.split(' ')]
     if args.gen_norm: config.gen_norm = args.gen_norm
     if getattr(args, "gen_upsampler", None): config.gen_upsampler = args.gen_upsampler
+    if getattr(args, "gen_convs_per_resolution", None) is not None:
+        config.gen_convs_per_resolution = int(args.gen_convs_per_resolution)
     if args.gen_lr: config.learning_rate = args.gen_lr
     if args.gen_beta_1: config.beta_1 = args.gen_beta_1
     if args.gen_beta_2: config.beta_2 = args.gen_beta_2
@@ -421,15 +571,25 @@ def configure_disc(config, args):
 def configure_generic(config, args):
     if args.save_dir: config.save_dir = _normalize_save_dir(args.save_dir)
     if getattr(args, "dataset_dir", None): config.dataset = args.dataset_dir
-    if args.rebuild: config.rebuild = args.rebuild
+    # `is not None`, not truthiness: under BooleanOptionalAction `--no-rebuild`
+    # yields False, and a truthiness guard would drop it and leave a persisted
+    # `rebuild: true` armed to wipe weights on every restart (plan 0.1).
+    if getattr(args, "rebuild", None) is not None: config.rebuild = args.rebuild
 
-    if args.resolution: config.resolution = args.resolution
+    if args.resolution:
+        # "256 256" -> [256, 256]. Was type=set, which turned the string into a
+        # set of characters and silently ignored the requested size (UPGRADES #5).
+        config.resolution = [int(d) for d in str(args.resolution).split()]
     if args.n_samples: config.n_samples = args.n_samples
     if args.batch_size: config.batch_size = args.batch_size
     if args.epochs: config.epochs = args.epochs
-    if args.latent_dim: config.latent_dim = args.latent_dim
-    # Progressive fade options
-    if args.fade: config.fade = args.fade
+    # int(), not the raw arg: this assignment lands *after* configure()'s cast,
+    # so passing --latent_dim used to leave a float on the config and crash
+    # model build at keras.Input(shape=(100.0,)) (UPGRADES #7).
+    if args.latent_dim is not None: config.latent_dim = int(args.latent_dim)
+    if getattr(args, "seed", None) is not None: config.seed = int(args.seed)
+    # Progressive fade options. Same `is not None` rule as rebuild above.
+    if getattr(args, "fade", None) is not None: config.fade = bool(args.fade)
     if args.fade_steps: config.fade_steps = args.fade_steps
     if getattr(args, "cleanup_milestone", None) is not None:
         config.cleanup_milestone = args.cleanup_milestone
@@ -438,8 +598,13 @@ def configure_generic(config, args):
         config.spectral_norm = args.spectral_norm
     if getattr(args, "augment", None) is not None:
         config.augment = args.augment
+    if getattr(args, "mask_board", None) is not None:
+        config.mask_board = args.mask_board
     if getattr(args, "lr_decay", None) is not None:
-        config.lr_decay = args.lr_decay
+        # "none" is the explicit off switch. Omitting --lr_decay preserves the
+        # persisted schedule, which is a different thing and is what made a
+        # schedule impossible to turn off from the command line.
+        config.lr_decay = None if args.lr_decay == "none" else args.lr_decay
     if getattr(args, "lr_min", None) is not None:
         config.lr_min = args.lr_min
     if getattr(args, "lr_decay_steps", None) is not None:
@@ -458,6 +623,16 @@ def configure_generic(config, args):
         config.ada_target = args.ada_target
     if getattr(args, "adaptive_steps", None) is not None:
         config.adaptive_steps = args.adaptive_steps
+    if getattr(args, "clamp_gp_under_sn", None) is not None:
+        config.clamp_gp_under_sn = args.clamp_gp_under_sn
+    if getattr(args, "grad_probe_interval", None) is not None:
+        config.grad_probe_interval = int(args.grad_probe_interval)
+    if getattr(args, "max_steps", None) is not None:
+        config.max_steps = int(args.max_steps)
+    if getattr(args, "honor_splits", None) is not None:
+        config.honor_splits = args.honor_splits
+    if getattr(args, "image_root", None) is not None:
+        config.image_root = args.image_root or None
     if getattr(args, "modality", None) is not None:
         config.modality = args.modality
     if getattr(args, "sample_epoch_interval", None) is not None:

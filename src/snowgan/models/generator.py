@@ -87,19 +87,29 @@ class Generator(keras.Model):
             x = keras.layers.Conv3D(filters, ksize, strides=1, padding=self.config.padding)(x)
             return norm_act(x)
 
+        # Convs per resolution. 1 reproduces the pre-2026-06-13 generator — the
+        # only architecture with a proven result (the magnified_profiles v0.1.0
+        # backbone, 157k batches of richly textured output). 2 is the post-audit
+        # stack (b4e0677), which doubled depth to ~11 layers and in doing so made
+        # normalization mandatory: un-normalized it vanishes to output std ~8e-4
+        # (a flat grey frame), and PixelNorm'd it saturates the tanh head
+        # (UPGRADES #47). Depth here is load-bearing, not a free capacity knob.
+        convs_per_res = max(1, int(getattr(self.config, "gen_convs_per_resolution", 2) or 2))
+
         for filters in self.config.filter_counts:
             if upsampler == "transpose":
                 # Learned upsampling (Conv3DTranspose) so the generator can
-                # synthesize texture, plus a stride-1 conv for capacity.
+                # synthesize texture; optional stride-1 conv adds capacity.
                 x = keras.layers.Conv3DTranspose(filters, ksize, strides=up_size, padding=self.config.padding)(x)
                 x = norm_act(x)
-                x = conv_block(x, filters)
+                for _ in range(convs_per_res - 1):
+                    x = conv_block(x, filters)
             else:
-                # Resize-convolution (Odena et al. 2016): nearest upsample + two
+                # Resize-convolution (Odena et al. 2016): nearest upsample +
                 # stride-1 convs. Avoids checkerboard but is low-pass.
                 x = keras.layers.UpSampling3D(size=up_size)(x)
-                x = conv_block(x, filters)
-                x = conv_block(x, filters)
+                for _ in range(convs_per_res):
+                    x = conv_block(x, filters)
             feats.append(x)
 
         # toRGB does the final doubling (the "+1" in the

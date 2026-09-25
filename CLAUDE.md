@@ -136,3 +136,44 @@ those cases.
 - The change touches CUDA / driver setup in a way that could brick the training host.
 - The two-lens review surfaces a contract break that wasn't in the stated goal — stop,
   summarize, let Denny decide whether the scope widens or the plan shrinks.
+
+## 9. GAN experiment discipline (hard enforcement)
+
+Adopted 2026-07-26 after a run of investigations that changed several things at once
+(generator depth, normalization, output gain, minibatch-stddev, board masking, critic
+ratios) and could attribute none of the outcomes. Training a GAN is an experiment, not
+a build; it is governed by controls, not vibes.
+
+- **Ground truth first.** Every experiment campaign starts from a baseline that
+  *provably trains* — not one that merely loads old weights. "This architecture produced
+  images once" is a static claim; "this code trains it from scratch to structure" is the
+  claim that matters. Establish the latter (a short control run) before building on it.
+- **One architectural piece at a time — but budget multiple runs to tune it.** Each
+  campaign introduces *exactly one* new architecture/runtime element on top of the
+  established baseline. No stacking two new pieces. But introducing a piece is **not** a
+  single run: assume the piece needs tuning before it can be fairly judged, so a single
+  piece may span several runs that vary *only that piece's own knobs* (its learning rate,
+  weight, init, ratio, etc.) — never a second new piece. Judge a piece by its
+  **best-tuned run**, not its first: a piece that failed once may just have been
+  mis-tuned. Declare a verdict on the piece (keep / drop) only after a genuine tuning
+  effort, and record how many runs it took. A run that changed more than the piece under
+  test — or that changed a *different* piece — is uninterpretable and does not count as
+  evidence.
+- **The scoreboard is fixed and applied identically every run** — no judging by loss
+  curves (WGAN loss magnitude is not quality). In order:
+  1. **Kill-check (cheap, minutes):** latent diversity — mean pairwise
+     `|G(zᵢ) − G(zⱼ)|` must be well above 0 (≈0 ⇒ mode collapse); saturation —
+     `frac(|output| > 0.99)` low and output std near the data's (~0.5). A run failing
+     this is dead; do not let it run for hours.
+  2. **Sample inspection:** open `synthetic_images/*.png`; two latents must yield two
+     *different*, non-saturated images. (Loss can look fine while samples are garbage —
+     the samples are the arbiter.)
+  3. **Downstream probe (the real metric):** a linear probe on avalanche-risk labels.
+     Feature transferability, not image beauty, is the objective. Generation-not-
+     collapsing is necessary, not sufficient.
+- **Log before the next run.** Every run gets a row in
+  [docs/experiments.md](docs/experiments.md) — base commit, the single change, scoreboard
+  result, verdict — *before* the next run starts. The log is the memory; re-deriving what
+  was already tried is the waste this section exists to prevent.
+- **Research justifies changes.** A proposed increment cites a reason (repo evidence or a
+  source), not a guess. "Might help" is not a plan.

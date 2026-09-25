@@ -35,13 +35,15 @@ def main():
         os.makedirs(args.save_dir, exist_ok=True)
 
     gen_config_path = os.path.join(args.save_dir, "generator_config.json")
-    gen_config = build(gen_config_path)
+    # autosave=True: this process owns these sidecars and is expected to write
+    # them back. Readers (snowGradient, AvAI) get the default autosave=False.
+    gen_config = build(gen_config_path, autosave=(args.mode == "train"))
     gen_config = configure_gen(gen_config, args)
     # Persist configured generator settings (including fade/fade_steps) immediately
     gen_config.save_config(gen_config_path)
 
     disc_config_path = os.path.join(args.save_dir, "discriminator_config.json")
-    disc_config = build(disc_config_path)
+    disc_config = build(disc_config_path, autosave=(args.mode == "train"))
     disc_config = configure_disc(disc_config, args)
      # Persist configured discriminator settings immediately
     disc_config.save_config(disc_config_path)

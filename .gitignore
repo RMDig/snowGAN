@@ -190,3 +190,14 @@ tmpclaude-*/
 tmp_check.txt
 cuda-keyring_*.deb
 
+
+# Local dataset clone and derived image mirrors. `data/rmsnow` is ~53 GB of
+# full-resolution PNGs pulled from the HF dataset; a bare `git add -A` would
+# otherwise stage all of it. Mirrors built by scripts/build_image_cache.py live
+# outside the repo (~/rmdig-cache-<size>) but are ignored here too in case
+# someone points --out at the worktree.
+# Leading slash: root-only. A bare `data/` also matches src/snowgan/data/,
+# which silently un-stages the data layer package.
+/data/
+/rmdig-cache-*/
+.leak_probe.py
