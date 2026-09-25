@@ -590,14 +590,52 @@ Full write-up and the campaign that acts on them:
     a measured bottleneck, but at typical cadences (≥100 batches) it isn't worth
     the complexity.
 
-39. **No lock on `save_dir` → concurrent runs silently corrupt each other.**
-    Two `snowgan --mode train --save_dir ./models` processes will race on
-    `config.save_config()`, on `keras.Model.save()` (not atomic — writes several temp files
-    internally), and on `synthetic_images/` counter recovery. No lockfile, no PID file.
-    Root cause: `save_dir` is shared mutable state with no concurrency discipline. Fix:
-    acquire `filelock.FileLock("{save_dir}/.snowgan.lock")` in `Trainer.__init__`;
-    release on graceful shutdown; include the current PID and host in the lock payload
-    so a stuck lock can be diagnosed.
+39. **No lock on `save_dir` → concurrent runs silently corrupt each other.** 🟠 OPEN.
+    Two `snowgan --mode train --save_dir ./models` processes race on
+    `config.save_config()`, on weight writes, and on `batch_*`/`synthetic_images`
+    naming. No lockfile, no PID file. Root cause: `save_dir` is shared mutable state
+    with no concurrency discipline.
+
+    **Observed in the wild, 2026-09-25.** A `pkill` silently failed during a relaunch
+    and two trainers ran against `keras/snowgan/control_1024/` concurrently for about a
+    minute. Symptom: an 81-step run whose sidecar read `critic_updates: 5800` — the
+    other process's counter. Nothing was released from it, but it is no longer a
+    theoretical entry.
+
+    **What did and did not survive that incident**, which is the useful part for
+    scoping the fix:
+
+    | artifact | behavior under concurrency |
+    |---|---|
+    | `metrics.jsonl` | **tolerates it.** Append-only, records under `PIPE_BUF` so `O_APPEND` writes are atomic, and every record carries a `launch_id` — interleaved rows stay attributable. |
+    | `*_config.json` | **corrupts.** Last writer wins and the two processes hold different in-memory state. This is what produced the 5800. |
+    | `generator_loss.txt` / `discriminator_loss.txt` | **corrupts.** `save_history` rewrites the whole file from an in-memory list, so the loser's history is simply replaced. |
+    | `*.weights.h5` | atomic per file (`_atomic_save_weights`), so never torn — but two trainers still interleave *whole* checkpoints from different models. |
+    | `batch_N/`, `synthetic_images/` | collide on name; each write is internally fine. |
+
+    **Design note from snowGradient (2026-09-25).** They hit the same class of bug in
+    their `tf.data` cache — a deterministic cache key (deliberately so, to stop
+    cross-arm contamination) meant two concurrent invocations shared cache files. They
+    fixed it by scoping temp roots under a per-invocation `{pid}-{timestamp}` directory
+    cleaned at exit, which also closed a stale-cache case, and observed: *"if each run
+    owns its own directory, there's nothing to lock."*
+
+    That does not replace the lock here, and they said as much: snowGAN's `save_dir` is
+    **sequentially** shared by design — resume means a later run deliberately adopts an
+    earlier run's weights and config. Per-invocation directories cannot express that.
+
+    But it does usefully shrink the lock's scope. Split `save_dir` into:
+      - **resume state** (weights, the two sidecars, and — once UPGRADES #36 lands — a
+        persisted `global_batch`): genuinely shared, must be under the lock;
+      - **derived output** (`batch_N/` snapshots, `synthetic_images/`, `history.png`,
+        the legacy `*_loss.txt` pair): per-invocation, or append-only-with-`launch_id`
+        like `metrics.jsonl` already is.
+
+    Then a missing or failed lock degrades to duplicate previews rather than a corrupt
+    checkpoint or a fabricated counter. Fix remains: `filelock.FileLock` in
+    `Trainer.__init__` with PID+host in the payload, plus stale-lock detection — a
+    lock left by an OOM-killed run must not block the restart wrapper, which is the
+    normal path here, not the exception.
 
 40. ~~**Mixed-depth datasets trigger a model rebuild every batch.**~~
     **Resolved 2026-05-09 (PR #12).** Co-resolved with #2: `DataManager.PAIR_DEPTH`
