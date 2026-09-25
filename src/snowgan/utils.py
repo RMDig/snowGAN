@@ -181,7 +181,14 @@ def parse_args():
     parser.add_argument('--grad_clip_norm', type=float, default=None, help='Global gradient norm clipping (0 to disable)')
     parser.add_argument('--max_rss_mb', type=float, default=None, help='Process RSS ceiling in MiB. When exceeded, the trainer saves a fresh checkpoint and exits with code 75 so a restart wrapper relaunches a clean process (workaround for the native CPU-RAM leak that OOM-kills long runs). 0/unset disables.')
     parser.add_argument('--ada_target', type=float, default=None, help='ADA target disc accuracy on reals (e.g. 0.6, 0 to disable)')
-    parser.add_argument('--adaptive_steps', action=argparse.BooleanOptionalAction, default=None, help='Enable adaptive disc/gen training step ratio. NOT reproducible: it persists its adjustment into training_steps, which is re-read as the new base on the next launch, so the ratio ratchets across restarts (2 -> 61 in the released magnified_profiles run). Leave off for any run you intend to interpret.')
+    # BooleanOptionalAction, not store_true: `adaptive_steps` persists into the
+    # config, and a store_true flag can only ever set it. Omitting the flag left
+    # args.adaptive_steps=None, which configure_generic reads as "no override" —
+    # so a persisted True could not be cleared from the CLI at all, only by
+    # hand-editing the config JSON. --no-adaptive_steps is the off switch.
+    parser.add_argument('--adaptive_steps', action=argparse.BooleanOptionalAction, default=None,
+                        help='Enable adaptive disc/gen training step ratio (--no-adaptive_steps to disable; '
+                             'omit to keep whatever the saved config has). Off by default on a fresh run.')
     parser.add_argument('--image_root', type=str, default=None, help='Local directory mirroring the dataset, keyed by the manifest file_path column (e.g. ~/rmdig-cache-512). The HF image column is URL-backed and costs ~2 s of HTTP per image per epoch, which makes the data pipeline ~97%% of a 1024px train step; a local root cuts that to ~0.007 s. Rows missing locally fall back to the remote column.')
     parser.add_argument('--honor_splits', action=argparse.BooleanOptionalAction, default=None, help='Exclude validation_pool / test_pool groups from the training stream. Default ON. Runs before 2026-09 trained on their own test_pool, which invalidates any downstream transfer probe; --no-honor_splits reproduces that old behavior.')
 

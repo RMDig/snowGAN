@@ -148,6 +148,20 @@ class DataManager:
         if "datatype" in manifest_df.columns:
             manifest_df["datatype"] = manifest_df["datatype"].map(normalize_datatype)
 
+        # Record which manifest this run actually saw. snowGradient had to infer
+        # this from pool contents to establish that the v0.1.0 backbones predate
+        # sites 3-6; a recorded revision makes it a lookup.
+        try:
+            revision = getattr(self.dataset["train"].info, "version", None)
+            fingerprint = getattr(self.dataset["train"], "_fingerprint", None)
+            resolved = str(revision) if revision else None
+            if fingerprint:
+                resolved = f"{resolved or 'v?'}+fp:{fingerprint}"
+            if resolved:
+                config.dataset_revision = resolved
+        except Exception:
+            pass
+
         self.manifest_columns = manifest_df.columns.tolist()
         self.manifest = manifest_df.values.tolist()
 

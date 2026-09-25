@@ -145,6 +145,14 @@ config_template = {
             # Accumulated critic updates (resume state, CLAUDE.md §5). Gates are
             # expressed on this axis, so it must survive a restart.
             "critic_updates": 0,
+            # HF dataset commit SHA the run trained against, and the snowgan
+            # version that wrote this sidecar. Both exist because reconstructing
+            # "which manifest did this backbone see?" otherwise requires
+            # inferring it from the pool contents -- which is exactly what
+            # snowGradient had to do in Sept 2026 to establish that the v0.1.0
+            # backbones predate sites 3-6. A lookup beats an inference.
+            "dataset_revision": None,
+            "snowgan_version": None,
             "seed": 42,
             "modality": "magnified_profile",
             "sample_epoch_interval": 1,
@@ -152,8 +160,18 @@ config_template = {
 }
 
 class build:
-    def __init__(self, config_filepath):
+    def __init__(self, config_filepath, autosave=False):
+        """Load a config.
+
+        Args:
+            config_filepath: path to the JSON sidecar.
+            autosave: register an ``atexit`` hook that writes this config back
+                to ``config_filepath`` on process exit. **Default False.** Only
+                a process that owns the file (i.e. the trainer) should pass
+                True; a reader that merely loads a sidecar must not rewrite it.
+        """
         self.config_filepath = config_filepath
+        self._autosave_registered = False
         if os.path.exists(config_filepath): # Try and load config if folder passed in
             print(f"Loading config file: {self.config_filepath}")
             config_json = self.load_config(self.config_filepath)
@@ -179,6 +197,8 @@ class build:
         config_json.setdefault("honor_splits", True)
         config_json.setdefault("image_root", None)
         config_json.setdefault("critic_updates", 0)
+        config_json.setdefault("dataset_revision", None)
+        config_json.setdefault("snowgan_version", None)
         # Infer the modality mode from the existing depth on legacy configs.
         # Pre-#6 (single-modality, depth=1) configs are profile training; post-#6
         # configs (silent rebuild → depth=2) are merged. New configs default to
@@ -188,12 +208,41 @@ class build:
 
         self.configure(**config_json) # Build configuration
 
-        atexit.register(self.save_config)
+        # Opt-in, not automatic (snowGradient 2026-09-25).
+        #
+        # `save_config` writes back to `self.config_filepath`. Registering that
+        # at exit for EVERY build() means a read-only consumer rewrites the very
+        # sidecar it loaded -- and snowGradient loads released sidecars straight
+        # out of the shared HuggingFace cache, then sets `resolution_override`
+        # for its probes. The result, verified empirically on their side, is a
+        # released artifact silently rewritten from [1024,1024] to [64,64] in a
+        # cache shared by every consumer on the machine.
+        #
+        # They defend against it with `atexit.unregister(cfg.save_config)`, which
+        # works but is a silent no-op the moment this registration becomes a
+        # lambda, a functools.partial, or a renamed method. A library that
+        # rewrites its input file on exit is surprising for any read-only
+        # reader, so the default is now off: the trainer opts in explicitly,
+        # everyone else gets a plain reader.
+        if autosave:
+            self.enable_autosave()
 
         
     def __repr__(self):
         return '\n'.join([f"{key}: {value}" for key, value in self.__dict__.items()])
     
+    def enable_autosave(self):
+        """Register the atexit write-back. Idempotent."""
+        if not self._autosave_registered:
+            atexit.register(self.save_config)
+            self._autosave_registered = True
+
+    def disable_autosave(self):
+        """Unregister the atexit write-back. Idempotent and safe if never registered."""
+        if self._autosave_registered:
+            atexit.unregister(self.save_config)
+            self._autosave_registered = False
+
     def save_config(self, config_filepath = None):
         # Save the config filepath if passed in
         if config_filepath: self.config_filepath = config_filepath
@@ -230,7 +279,7 @@ class build:
             config_json = config_template
         return config_json
 
-    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", gen_convs_per_resolution=2, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, mask_board=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0, clamp_gp_under_sn=False, grad_probe_interval=50, max_steps=0, honor_splits=True, image_root=None, critic_updates=0, **unknown_fields):
+    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", gen_convs_per_resolution=2, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, mask_board=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0, clamp_gp_under_sn=False, grad_probe_interval=50, max_steps=0, honor_splits=True, image_root=None, critic_updates=0, dataset_revision=None, snowgan_version=None, **unknown_fields):
         # Forward compatibility. `configure` is called as `configure(**config_json)`,
         # so without this a config written by a NEWER snowgan raises TypeError on an
         # OLDER one — and the sidecars are a cross-repo contract: snowGradient pins
@@ -347,6 +396,11 @@ class build:
         self.honor_splits = bool(honor_splits) if honor_splits is not None else True
         self.image_root = str(image_root) if image_root else None
         self.critic_updates = int(critic_updates) if critic_updates else 0
+        self.dataset_revision = str(dataset_revision) if dataset_revision else None
+        # Stamped with the running version, not the loaded one: this records who
+        # last wrote the file, which is the question a schema mismatch asks.
+        from snowgan import __version__ as _snowgan_version
+        self.snowgan_version = _snowgan_version
         self.seed = int(seed) if seed is not None else 42
         self.modality = str(modality) if modality else "magnified_profile"
         self.sample_epoch_interval = int(sample_epoch_interval) if sample_epoch_interval is not None else 1
@@ -421,6 +475,8 @@ class build:
             "honor_splits": self.honor_splits,
             "image_root": self.image_root,
             "critic_updates": self.critic_updates,
+            "dataset_revision": self.dataset_revision,
+            "snowgan_version": self.snowgan_version,
             "seed": self.seed,
             "modality": self.modality,
             "sample_epoch_interval": self.sample_epoch_interval,

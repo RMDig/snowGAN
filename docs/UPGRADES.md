@@ -211,6 +211,41 @@ break the checkpoint format).
     filter is correct against it. (`wind_loading` int→string in the same upload was a genuine
     `load_dataset` `ValueError` — card declared `['none','low','moderate','high']` vs data
     `'medium'` — and was fixed dataset-side; separate from snowGAN.)
+46. ~~**Adaptive `disc_steps` ratchets its own ceiling on every resume.**~~
+    **Resolved 2026-07-16.** `_update_adaptive_steps` wrote the evolved step count back
+    into `disc.config.training_steps`, which `Config.dump()` persists. On resume,
+    `Trainer.__init__` read that evolved value as `_base_disc_steps` and set
+    `max_steps = base * 2` — so the ceiling doubled per restart instead of staying
+    anchored to the launch value. Observed on the core run: disc_steps 1 (batch 100k)
+    → 6 → 10 → 16 (batch 332k) → 37, i.e. 37 critic updates per generator update.
+
+    Root cause: `training_steps` served as both the launch parameter and the live
+    adaptive counter, and persisting it conflated the two. Note `training_steps` is not
+    in the resume-state contract (CLAUDE.md §5 lists `train_ind`, `seen_profiles`,
+    `fade_step`, `current_epoch`, `global_batch`) — it was never meant to survive a
+    process.
+
+    Fix: the live counts (`Trainer._disc_steps` / `._gen_steps`) are runtime-only and
+    die with the process; `config.training_steps` is the launch parameter and is never
+    written during training. Regression test: `tests/unit/test_adaptive_steps.py`
+    simulates three save/resume cycles and asserts the ceiling does not move.
+
+    **Interacts with #0.** Each `--max_rss_mb` restart was a ratchet click, so the leak
+    workaround accelerated the ratchet, and the extra disc steps in turn made the leak
+    arrive sooner — a feedback loop. **Migration:** configs written before this fix hold
+    a poisoned `training_steps` (the core run's reads 37). It is indistinguishable from
+    a deliberate launch value, so it cannot be auto-detected — pass `--disc_steps N`
+    explicitly once on the next launch to reset it.
+
+    **Unverified lead for #0.** At disc_steps=37 the observed leak was ~46 MiB/batch
+    (RSS 23914 → 23960 → 24007 on consecutive batches) against the ~3.6 MiB/batch
+    measured when disc_steps was ~3. 37 × ~1.2 MiB ≈ 46 MiB fits, which would make the
+    leak **per-train-step, not per-batch**. If so, the flat `bench_disc_loop.py` result
+    may simply have run too few inner steps to show slope. Worth pinning the step count
+    as an axis in the next heap-profiler run before trusting any per-batch figure.
+
+## Tier 🟠 — production readiness (do before calling this a product)
+
 49. **Blue measurement-board masking for the core modality** (`--mask_board`, added
     2026-07-25). Core photos are a snow sample on a blue ruler board; the board, ruler,
     and printed "Centimeters" text dominate every frame and are a confound for the
@@ -287,14 +322,19 @@ Full write-up and the campaign that acts on them:
     here: it changes the gradient the generator receives, so under the plan's §2 rule it
     is an increment, not a fix.
 
-56. **`adaptive_steps` ratchets across restarts.** 🔴 OPEN (mitigated). It persists its
-    adjustment into `training_steps`, which is re-read as `_base_disc_steps` on the next
-    launch while `max_steps = base × 2` — and the restart wrapper relaunches constantly.
-    The ratio is therefore a random walk with memory: 2 → 61 in the released
-    `magnified_profiles` run, 1 in several dead ones. Its decision metric,
-    `|disc|/(|disc|+|gen|)`, compares two uncalibrated WGAN magnitudes. Mitigated by #6
-    (it can now be turned off) and documented in `--help`; the ratchet itself is untouched.
+56. ~~**`adaptive_steps` ratchets across restarts.**~~ **Already resolved on `main` by
+    #46 (PR #30, merged 2026-08-18) — this entry was written against a stale branch.**
+    The audit rediscovered the ratchet independently and proposed mitigating it via the
+    CLI; #46's fix is better and is the one in effect: the live counts
+    (`Trainer._disc_steps` / `._gen_steps`) are runtime-only and `config.training_steps`
+    is never written during training, so the launch parameter and the live counter can no
+    longer be conflated. `--no-adaptive_steps` (also from PR #30) makes a persisted
+    `true` clearable.
 
+    Retained here only for the forensic point it anchors: the released
+    `magnified_profiles` config records `disc_steps 47` because of this ratchet, which is
+    why that number must not be read as a deliberate recipe choice. See the correction in
+    [experiments.md](experiments.md).
 57. **The multiscale critic is nearly inert but contaminates the loss.** 🟠 OPEN. The
     low-res head trains with a bare `mean(fake) − mean(real)` and **no gradient penalty**
     ([trainer.py:747-767](../src/snowgan/trainer.py#L747)), its gradient reaches only its
