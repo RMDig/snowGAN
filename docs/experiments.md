@@ -185,6 +185,45 @@ since `fde5671`". The control run disambiguates them.
 (`core_proven_v2` died with the same 2:3 and the same LRs as both releases), and
 `grad_clip_norm` (the structure era had clipping off).
 
+**Long-horizon baseline (2026-09-25/27): the run oscillates, it does not converge.**
+100,000 steps at 1024px on the exp-0 recipe (`control_1024`, git 8bcdbe4, 34.9 h,
+one RSS restart, 200,000 critic updates). Kill-checked at four checkpoints with the
+**same latents** (seed 0, n=8), so the differences are model changes, not sampling noise:
+
+| global_step | output mean | output std | saturated | latent diversity |
+|---|---|---|---|---|
+| 25,000 | −0.248 | 0.454 | 0.31% | 0.446 |
+| **50,000** | **−0.226** | **0.599** | 4.43% | 0.517 |
+| 75,706 | −0.476 | 0.329 | — | 0.307 |
+| 100,000 | +0.147 | 0.563 | 0.05% | 0.547 |
+| *real data* | *−0.22* | *0.63* | *~0%* | — |
+
+The closest match to the data's global statistics is **step 50,000**, not the final
+model. The trajectory wanders across the target rather than settling on it.
+
+Meanwhile the critic drifts monotonically away from 1-Lipschitz for the whole run:
+
+| window | ‖dD/dx‖ | λ·GP | \|W\| |
+|---|---|---|---|
+| 1–10k | 0.815 | 1.79 | 9.1 |
+| 40–50k | 1.330 | 2.21 | 27.5 |
+| 70–80k | 1.595 | 4.32 | 32.3 |
+| 90–100k | **1.913** | **9.40** | 55.9 |
+
+λ_gp = 10 is being outrun: the penalty term grows 5× while the constraint it enforces
+gets steadily looser. Nothing in this recipe damps either process — `--lr_decay none`
+was deliberate (the structure era had no schedule), so the models orbit at constant LR.
+
+**Not a data ceiling.** `scripts/memorization_check.py` on the final model: generated
+samples sit at mean distance **0.473** from their nearest training image, while training
+images sit at **0.335** from each other — ratio **1.41**, 13/16 with distinct nearest
+neighbours. With 2,006 unique images seen ~200× each and augmentation **off**,
+memorization is the expected failure and it is not happening.
+
+**Reading:** the binding constraint is optimization dynamics, not data volume and not
+training length. See the increment queue — ranks 3 (DiffAugment, never correctly enabled)
+and 4 (LR anneal) now have direct evidence behind them.
+
 **Retro takeaways (what NOT to repeat):**
 - Saturation/collapse survived *every* generator-side change and the data-confound removal
   (masking). ⇒ the driver is **training dynamics**, not generator architecture or the
