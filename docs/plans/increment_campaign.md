@@ -1,6 +1,7 @@
 # Increment campaign — damping the oscillation
 
-**Status:** proposed, not started. Awaiting sign-off on §7 (budget) before any run.
+**Status:** metrics validated 2026-09-29, arms not started. Metric revised after the
+noise probe found the original one produced false positives — see §2.
 **Governs:** the next three training runs. Operates under
 [CLAUDE.md](../../CLAUDE.md) §9 (one piece per campaign, judged by a fixed scoreboard,
 logged before the next run starts).
@@ -54,43 +55,56 @@ deliberate, to match the structure era.
 Fixed **before** any arm runs, because choosing how to judge after seeing results is how
 you fool yourself — and this repo has a documented history of unfalsifiable verdicts.
 
-Evaluated every 10,000 steps, always with **identical latents** (`seed 0`, `n=16`), so
-differences are model movement:
+**Revised 2026-09-29 after the noise probe.** The original design used `dist_err` (a
+first-two-moments match) sampled at 10k spacing. Both halves of that were wrong, and the
+probe caught it before the 83 h was spent:
 
-| metric | definition | role |
-|---|---|---|
-| `dist_err` | `\|mean − (−0.22)\|/0.22 + \|std − 0.63\|/0.63` | quality proxy — does output match the data's first two moments |
-| **`osc`** | standard deviation of `dist_err` over the last 3 checkpoints | **primary.** This is the defect being fixed |
-| `grad_norm_final` | mean ‖∇D‖ over the last 2,000 steps | validity — how far the critic escaped |
-| `grad_slope` | least-squares slope of ‖∇D‖ per 10k steps | is the escape still accelerating |
-| `diversity` | mean pairwise \|G(zᵢ) − G(zⱼ)\| | **gate, not a score.** < 0.049 ⇒ dead, arm discarded |
-| `mem_ratio` | gen→real NN ÷ real→real NN, final checkpoint | gate. < 0.8 ⇒ memorizing, arm discarded |
+- **The sampling aliased the signal.** At 1k spacing `dist_err` swings 0.245 → 1.808
+  across eight consecutive checkpoints of one run. Sampling every 10k measured a fast
+  signal too slowly; the reported `osc = 0.403` was an undersampled artifact.
+- **`dist_err` produces false positives.** Scored on `control_1024` (seed 42) against
+  `noise_seed43` — two runs differing *only* by seed, so the correct answer is
+  "indistinguishable" — `dist_err` reported 0.688 ± 0.095 vs 1.211 ± 0.175, **|t| = 2.64**.
+  It would have "found" an effect between arms that was pure seed noise.
 
-**Winner:** lowest `osc`, with `grad_norm_final` nearest 1.0 as tie-break, subject to
-both gates.
+### The metric
 
-**Honest limitation of `dist_err`.** It captures only the first two moments. A model can
-match mean and std perfectly and still produce structureless noise. The right metric is
-KID on a held-out pool (FID is unusable here: n=64 against 2048-dim features is
-rank-deficient, and `_compute_fid` draws its reals from the live training pointer). KID
-is not built. Until it is, `dist_err` is a **crude proxy** and sample inspection stays
-the arbiter per §9. Any arm that wins on `dist_err` but looks worse gets re-judged by eye.
+**KID** (Kernel Inception Distance; Bińkowski et al., ICLR 2018) against **held-out**
+images only — the 344 magnified_profile images in `validation_pool + test_pool`, which the
+run never trained on. Unbiased at small n, which FID is not: `_compute_fid` estimates a
+2048×2048 covariance from 64 samples and its bias depends on n, so two runs scored at
+different sample counts are not comparable (UPGRADES #58).
 
-### 2.1 The noise floor — how we know a difference is real
+Measured over **10 checkpoints at 1k spacing** across the run's last 10k steps, 200
+generated samples each, 10 subsets of 100. Reported as mean ± SE over checkpoints.
 
-We have no run-to-run variance estimate, and at `batch_size 4` GAN variance is large.
-Without one, "arm A beat baseline by X" is uninterpretable.
+On the same seed-42/seed-43 pair, KID gives 0.400 ± 0.033 vs 0.402 ± 0.021 — **|t| = 0.05**,
+correctly indistinguishable.
 
-Buying one costs a second baseline seed (~28 h). Instead, use the baseline's **own
-oscillation amplitude as the noise floor**: `osc` measures how much `dist_err` moves with
-no intervention at all. An arm whose improvement is smaller than the baseline's `osc` has
-not demonstrated an effect.
+| metric | role |
+|---|---|
+| **`KID_mean`** | **PRIMARY.** Mean over the 10 checkpoints. Lower is better |
+| `KID_se` | SE over checkpoints. An arm is distinguishable only at >2× pooled SE |
+| `KID_cv` | std/mean across checkpoints — how much the run wanders, i.e. the oscillation, now on a metric that can measure it |
+| `grad_norm_final` | validity: once the critic escapes, the loss is not a Wasserstein distance |
+| `grad_slope` | is the escape still accelerating |
+| `diversity` | **gate, not a score.** < 0.049 ⇒ dead, arm discarded |
+| `mem_ratio` | gate. < 0.8 ⇒ memorizing, arm discarded |
+| `dist_err` | **demoted to descriptive.** Retained for continuity with the baseline log; never decisive |
 
-This is cheaper and it is the conservative direction — it can only make us under-claim.
-If two arms finish inside the floor of each other, the tie is broken by a seed repeat,
-not by preference.
+**Minimum detectable effect:** 2 × pooled SE ≈ **0.078 KID** on a base of 0.40 (~20%
+relative). An arm inside that is a tie, and a tie is broken by a seed replicate — not by
+preference.
 
----
+**Measurement precision vs model movement.** Each checkpoint's KID carries its own SE of
+~0.002–0.005 (≈1% of the value), so the 0.065–0.105 spread *across* checkpoints is real
+model movement, not measurement noise. `dist_err` could not separate those two things,
+which is why its swing was uninterpretable.
+
+**What KID still cannot do.** It scores Inception features, which are tuned for natural
+images, not snow crystal structure. A model could improve KID while looking worse to a
+domain eye. Sample inspection stays the arbiter per §9, and the downstream probe — which
+still does not exist — remains the real objective.
 
 ## 3. The reference
 
@@ -131,9 +145,10 @@ the anneal until step 50k — past half the run. With `fade=False`, `fade_steps`
 other effect, so setting it to 1 only removes the offset. This is exactly the trap that
 froze the released run's LRs at `lr_min` from step 250k.
 
-**Prediction if true:** `osc` drops materially; `grad_slope` flattens late; `dist_err`
-final improves. **If false:** `osc` unchanged — the oscillation is driven by something
-other than step size.
+**Prediction if true:** `KID_mean` drops by more than 0.078 (the minimum detectable
+effect), `KID_cv` falls as the orbit contracts, `grad_slope` flattens late. **If false:**
+`KID_mean` inside 0.078 of baseline — the oscillation is driven by something other than
+step size.
 
 ### Arm B — stronger Lipschitz penalty
 
@@ -170,9 +185,9 @@ change and therefore a *separate tuning run within this arm*, not part of the fi
 --augment  (+ translation)     # run C2: after C1, if C1 is not worse
 ```
 
-**Prediction if true:** `osc` and `dist_err` both improve, `mem_ratio` rises (more
-novelty). **If false:** no change, or diversity drops — augmentation too strong for the
-generator's capacity.
+**Prediction if true:** `KID_mean` drops by more than 0.078, `mem_ratio` rises (more
+novelty). **If false:** no change, or diversity drops below the gate — augmentation too
+strong for the generator's capacity.
 
 ---
 
@@ -246,8 +261,8 @@ consecutive restarts resumed cleanly in the restart test.
 
 | risk | mitigation |
 |---|---|
-| Difference smaller than run-to-run noise | Baseline `osc` as the noise floor (§2.1); ties broken by seed repeat, not preference |
-| `dist_err` rewards moment-matching over structure | Sample inspection remains the arbiter (§9); any win that looks worse is re-judged by eye |
+| Difference smaller than run-to-run noise | Measured: 2x pooled SE = 0.078 KID (§2). Ties broken by seed repeat, not preference |
+| KID scores Inception features, not snow structure | Sample inspection remains the arbiter (§9); any win that looks worse is re-judged by eye |
 | Arm C's code change contaminates A and B | Verified inert under `--no-augment` (§3); A and B run on `8bcdbe4` regardless |
 | `_cleanup_saved_batches` no-op (UPGRADES #66) | 3 arms × ~45 GB ≈ 135 GB. 1.5 TB free, so tolerable — but fix it before a fourth |
 | Two trainers on one `save_dir` (UPGRADES #39) | Confirm zero `bin/snowgan` processes before each launch; arms run sequentially |
@@ -257,9 +272,9 @@ consecutive restarts resumed cleanly in the restart test.
 
 ## 9. Sequence
 
-1. Land the DiffAugment generator-step fix + test. No GPU. Does not disturb A or B.
-2. Build the campaign comparison tool (`scripts/compare_runs.py`): reads N `metrics.jsonl`
-   plus checkpoint kill-checks, emits the §2 table. No GPU.
+1. ~~Land the DiffAugment generator-step fix + test.~~ **Done** (`f3d093d`).
+2. ~~Build the campaign comparison tool.~~ **Done.** `scripts/compare_runs.py` (descriptive
+   metrics, no GPU) and `scripts/kid_check.py` (the primary metric; ~4 min of GPU per run).
 3. Arm A (27.8 h) → log to experiments.md → Arm B (27.8 h) → log → Arm C1 (27.8 h) → log.
 4. Report the ranking, and name what deserves tuning spend.
 
