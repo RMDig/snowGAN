@@ -242,6 +242,12 @@ class Trainer:
         gen_step = int(getattr(self.gen.config, 'fade_step', 0) or 0)
         disc_step = int(getattr(self.disc.config, 'fade_step', 0) or 0)
         self.global_step = max(gen_step, disc_step)
+        # Initialised HERE, with global_step, not later with the instrumentation:
+        # _sync_fade_progress runs a few lines below and persists it, so a later
+        # assignment meant the very first sync raised AttributeError on every
+        # single run and was swallowed by that method's try/except. Resume state
+        # belongs together (CLAUDE.md §5).
+        self.critic_updates = int(getattr(self.gen.config, 'critic_updates', 0) or 0)
         self.fade_steps = max(1, int(getattr(self.gen.config, 'fade_steps', 1)))
         self.fade_complete = not (getattr(self.gen.config, 'fade', False) and getattr(self.gen, 'fade_endpoints', None) is not None)
         if self.global_step >= self.fade_steps:
@@ -333,12 +339,11 @@ class Trainer:
         self._probe_rng = tf.random.Generator.from_seed(int(getattr(self.gen.config, 'seed', 42)) + 1)
         # Hard step cap; 0 = uncapped.
         self.max_steps = int(getattr(self.gen.config, 'max_steps', 0) or 0)
-        # Accumulated, not derived. `global_step * disc_steps` re-attributes the
-        # entire run history to whatever ratio is current, which is wrong after
-        # any resume with a different --disc_steps and badly wrong under
-        # adaptive_steps (2 -> 61 in the released run). check_gates.py slices on
-        # this axis, so a rescaled axis silently moves every gate.
-        self.critic_updates = int(getattr(self.gen.config, 'critic_updates', 0) or 0)
+        # NOTE: self.critic_updates is initialised with global_step above. It is
+        # accumulated, not derived -- `global_step * disc_steps` re-attributes the
+        # entire run history to whatever ratio is current, which is wrong after any
+        # resume with a different --disc_steps and badly wrong under adaptive_steps.
+        # check_gates.py slices on this axis, so a rescaled axis moves every gate.
 
         # Adaptive disc/gen step ratio.
         #
@@ -985,8 +990,20 @@ class Trainer:
                 # Forward pass noise through the generator to create synthetic images
                 use_fade = self._use_fade()
                 synthetic_images = self._generate_with_fade(noise, training=True)
+                # Augment INSIDE the tape, on the same manifold the critic was
+                # trained on. This is the point of *differentiable* augmentation
+                # (Zhao et al. 2020, DiffAugment): T(G(z)) must appear in the
+                # generator update too, so gradients flow back through the
+                # transform. Applying it only in the critic update — which is
+                # what this did — trains the critic on one distribution and then
+                # optimizes the generator against that critic on a different
+                # one, so every run with --augment was optimizing a mismatch.
+                #
+                # Reuses the critic step's aug_p so ADA's single probability
+                # governs both halves of the step.
+                gen_fake = diff_augment(synthetic_images, p=aug_p) if self.use_augment else synthetic_images
                 # Forward pass generator outputs through the discriminator for loss calculation
-                synthetic_output = self.disc.model(synthetic_images, training=True)
+                synthetic_output = self.disc.model(gen_fake, training=True)
                 # Calculate generator loss for backpropogation by calculating mean of disc output
                 gen_loss = self.gen.get_loss(synthetic_output)
             # Backpropogate to calculate gradient of trainable parameters given loss
@@ -1007,7 +1024,7 @@ class Trainer:
 
             gen_losses.append(float(gen_loss))
             # Drop per-iter tensors so refs don't pile up across the inner loop.
-            del tape, gen_gradients, var_list, synthetic_images, synthetic_output, gen_loss, noise
+            del tape, gen_gradients, var_list, synthetic_images, gen_fake, synthetic_output, gen_loss, noise
 
         # Record mean loss across the inner update loops. Using means makes
         # the curve faithful to all training_steps iterations and stabilizes
@@ -1413,7 +1430,7 @@ class Trainer:
                 # a counter that silently restarts at 0 on resume moves every
                 # gate. Initializing it from config without ever writing it back
                 # made the "accumulated, not derived" fix a no-op across restarts.
-                cfg.critic_updates = int(self.critic_updates)
+                cfg.critic_updates = int(getattr(self, "critic_updates", 0))
                 if gen_cfg is not None and cfg is not gen_cfg and hasattr(cfg, 'fade_steps') and hasattr(gen_cfg, 'fade_steps'):
                     if cfg.fade_steps != gen_cfg.fade_steps:
                         cfg.fade_steps = gen_cfg.fade_steps
