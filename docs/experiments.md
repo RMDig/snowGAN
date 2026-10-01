@@ -113,6 +113,53 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
 | **1z-B** | 09-23 | 1z-A | **only change: `--spectral_norm --disc_lambda_gp 1.0`** (the collapsed runs' recipe) | same | nn_dist **0.570 → 0.292**; diversity **0.372**; ‖dD/dx‖ settles **0.35–0.42** (over-smoothed) with λ·GP stuck at 0.33–0.47 | ✅ fits — hypothesis **not** confirmed at this scale; mechanism corrected (see above) |
 | **0** | 09-23 | HEAD + Phase 0 | **control: does current code train the structure-era recipe from scratch?** disc 2 : gen 3, λ_gp 10, **no SN**, no clip, no decay, no EMA, no ADA, no multiscale, seed 42 | magnified_profile **512**, 10,000 steps = 20,000 critic updates, 133 min on RTX 5080 | **‖dD/dx‖ 1.046 (real) / 1.030 (interp) / 1.081 (fake)**; \|W\| 1.0 vs 1774 ceiling; λ·GP 25.4% of loss; **latent diversity 0.609** (released model 0.490, dead runs 0.00003); std 0.583; saturated 3.35%; samples show the crystal-mesh motif, two latents visibly different | **✅ PASSES** |
 
+**Arm A — LR anneal (2026-10-01): promising, untuned, and confounded by freezing.**
+80,000 steps at 1024px, identical to `control_1024` except `--lr_decay cosine
+--lr_decay_steps 80000 --lr_min 1e-6 --fade_steps 1`. Judged on KID against the 344
+held-out images, 10 checkpoints at 1k spacing over 70,000–79,000, vs the baseline's same
+window.
+
+| | KID mean | std | SE | Spearman ρ (step vs KID) | first → last |
+|---|---|---|---|---|---|
+| baseline | 0.2987 | 0.0760 | 0.0240 | **+0.15** | 0.255 → 0.371 |
+| **Arm A** | **0.2270** | 0.0511 | 0.0162 | **−0.95** | 0.259 → **0.166** |
+
+difference +0.0717, pooled SE 0.0290, |t| = 2.47.
+
+**The pre-registration disagrees with itself and the result is borderline on the mean.**
+§2 states the criterion both as a formula ("difference > 2 × pooled SE" = 0.058 here →
+PASS) and as a number ("MDE ≈ 0.078" → TIE). Recorded as ambiguous rather than resolved
+in the favourable direction. The number was estimated from the seed-42/43 pair whose
+pooled SE (0.039) was larger than this comparison's (0.029).
+
+**The trend is not borderline.** Arm A declines almost monotonically (ρ = −0.95) and ends
+at its own best checkpoint; the baseline oscillates (ρ = +0.15) and ends at its 9th-best
+of 10. Final checkpoints: 0.166 vs 0.371. That is the predicted effect — the hypothesis
+was never "annealing lowers KID" but "annealing stops the orbiting."
+
+**But weight movement confounds it.** Relative generator weight movement per 1,000 steps
+over the same window: baseline **0.167**, Arm A **0.0096** — 17× less. A model whose LR
+has collapsed to 2.3e-6 produces stable output because it has stopped moving, so "the
+oscillation stopped" is partly tautological.
+
+What survives the confound: Arm A reached KID **0.166**, better than the baseline's best
+anywhere in its window (0.219), while moving 17× less. More movement did not buy more
+progress — the baseline got *worse* across the same window (0.255 → 0.371). The defensible
+claim is "annealing settles at a better point than the oscillating baseline occupies at
+equal step count", not "annealing improves the attainable optimum".
+
+**Lipschitz: damped, not cured.** ‖∇D‖ held ~0.28 below baseline throughout the back half
+(70–80k: 1.319 vs 1.595), but bottomed at 1.103 around 50–60k and then *rose* while the LR
+was 2.3e-6. Step size cannot explain a rise at a near-frozen LR, so the escape is only
+partly step-size-driven — which is the case for Arm B attacking the constraint directly.
+
+**Gates (final model):** latent diversity 0.552, min pairwise 0.310, saturation 1.15%,
+output mean −0.090 / std 0.540. All pass.
+
+**Open, by §9's own standard:** one run, untuned. `lr_min 1e-6` may freeze too early and
+give up further progress; the anneal's own knobs (`lr_min`, horizon, schedule shape) have
+not been varied. A piece is judged by its best-tuned run, and this is its first.
+
 **Mechanism correction — SN *over*-constrains the critic (1z-B, 2026-09-23).** The A/B below
 ran the same 8-image overfit under the collapsed runs' recipe (`--spectral_norm
 --disc_lambda_gp 1.0`). **It also fits** (nn_dist 0.570 → 0.292, diversity 0.372), so
