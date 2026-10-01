@@ -92,9 +92,37 @@ correctly indistinguishable.
 | `mem_ratio` | gate. < 0.8 ⇒ memorizing, arm discarded |
 | `dist_err` | **demoted to descriptive.** Retained for continuity with the baseline log; never decisive |
 
-**Minimum detectable effect:** 2 × pooled SE ≈ **0.078 KID** on a base of 0.40 (~20%
-relative). An arm inside that is a tie, and a tie is broken by a seed replicate — not by
-preference.
+### Decision rule (revised 2026-10-01 — state it ONCE)
+
+Arm A's verdict was ambiguous because §2 originally stated the threshold **twice**, as a
+formula *and* as a number, and they disagreed once the data was in: the difference
+(+0.0717) passed "> 2 × pooled SE" (0.058) and failed "MDE ≈ 0.078". Choosing between
+them after seeing the result is exactly the discretion pre-registration exists to remove.
+
+**The criterion is the formula, computed on the comparison at hand. There is no second
+number.**
+
+An arm is **distinguishable from the reference** when *either*:
+
+1. `|KID_mean(arm) − KID_mean(ref)| > 2 × sqrt(SE_arm² + SE_ref²)`, SEs taken over the
+   10 checkpoints of each run's window; **or**
+2. the two runs' **Spearman ρ of KID against step** differ in sign with |ρ| > 0.6 each.
+
+Criterion 2 is new and is added because it is the statistic that actually carried Arm A's
+signal: the hypothesis under test is "the anneal stops the orbiting", and a mean over the
+window discards the trend that claim is about. Arm A: ρ = −0.95 converging; baseline:
+ρ = +0.15 wandering. The mean comparison nearly missed what the trend showed plainly.
+
+Reporting both is mandatory, including when they disagree — a split verdict is a real
+result, not a thing to resolve by preference.
+
+### The freezing control (mandatory from Arm A onward)
+
+Any arm that reduces KID variance must report **relative generator weight movement per
+1,000 steps** over its window, against the reference's. Arm A: 0.0096 vs the baseline's
+0.167 — 17× less. A model whose LR has collapsed produces stable output because it has
+stopped moving, so "the oscillation stopped" can be tautological. Without this number a
+stability claim is not interpretable.
 
 **Measurement precision vs model movement.** Each checkpoint's KID carries its own SE of
 ~0.002–0.005 (≈1% of the value), so the 0.065–0.105 spread *across* checkpoints is real
