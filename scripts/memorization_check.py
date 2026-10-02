@@ -61,7 +61,7 @@ def _training_groups(sidecar):
 
 
 def _load_real_corpus(config, image_root, probe_size, limit, groups=None):
-    """Downscaled training images as a single array, plus their identities.
+    """Downscaled training images, their file paths, and their (site, column, core) groups.
 
     `groups` restricts the corpus to the groups the run trained on (see
     `_training_groups`); None falls back to every image of the modality.
@@ -85,7 +85,7 @@ def _load_real_corpus(config, image_root, probe_size, limit, groups=None):
     if limit:
         rows = rows[:limit]
 
-    images, ids = [], []
+    images, ids, keys = [], [], []
     root = os.path.expanduser(image_root) if image_root else None
     for index, relative in rows:
         path = os.path.join(root, str(relative)) if root else None
@@ -97,9 +97,10 @@ def _load_real_corpus(config, image_root, probe_size, limit, groups=None):
                 dtype=np.float32)
         images.append(arr / 127.5 - 1.0)
         ids.append(relative)
+        keys.append((int(frame["site"][index]), int(frame["column"][index]), int(frame["core"][index])))
     if not images:
         raise SystemExit("No local training images resolved; pass --image_root.")
-    return np.stack(images), ids
+    return np.stack(images), ids, keys
 
 
 def _nearest(query, corpus):
@@ -117,6 +118,29 @@ def _nearest(query, corpus):
         best_d[better] = val[better]
         best_i[better] = start + idx[better]
     return best_d, best_i
+
+
+def _real_reference(corpus, keys, subset, exclude_same_group):
+    """Each subset image's distance to its nearest other corpus image.
+
+    With `exclude_same_group`, neighbours from the image's own (site, column,
+    core) group are skipped. Images within a group are near-duplicates, so the
+    unrestricted reference is mostly a sibling distance -- a bar so low that a
+    generator copying training images can clear it. The cross-group distance is
+    the scale of "as novel as a different snow sample", which is the question.
+    """
+    keys = np.array([hash(k) for k in keys])
+    out = []
+    for i in subset:
+        mask = np.ones(len(corpus), dtype=bool)
+        mask[i] = False
+        if exclude_same_group:
+            mask &= keys != keys[i]
+        if not mask.any():
+            raise SystemExit("cross-group reference needs at least two groups in the corpus")
+        d, _ = _nearest(corpus[i:i + 1], corpus[mask])
+        out.append(d[0])
+    return np.array(out)
 
 
 def main():
@@ -166,7 +190,7 @@ def main():
     if groups is None:
         print("WARNING: sidecar records no trained_pool; comparing against every image of the modality.")
     print(f"Loading training corpus at {args.probe_size}px...")
-    corpus, ids = _load_real_corpus(config, args.image_root, args.probe_size, args.limit, groups)
+    corpus, ids, keys = _load_real_corpus(config, args.image_root, args.probe_size, args.limit, groups)
     print(f"  {len(corpus)} training images from "
           f"{'all groups' if groups is None else f'{len(groups)} trained groups'} "
           f"(splits honoured: {sidecar.get('honor_splits') is True})")
@@ -185,21 +209,22 @@ def main():
 
     gen_d, gen_i = _nearest(samples, corpus)
 
-    # Real-to-real baseline: each training image's nearest OTHER training image.
-    # This is the reference the generated distance only means something against.
+    # Real-to-real references: the generated distance only means something
+    # against one. The verdict uses the CROSS-GROUP reference (decided
+    # 2026-10-02, before any release was scored); the any-neighbour one is
+    # printed for comparability with earlier campaign checks.
     rng = np.random.default_rng(args.seed)
     subset = rng.choice(len(corpus), size=min(200, len(corpus)), replace=False)
-    real_d = []
-    for i in subset:
-        others = np.delete(np.arange(len(corpus)), i)
-        d, _ = _nearest(corpus[i:i + 1], corpus[others])
-        real_d.append(d[0])
-    real_d = np.array(real_d)
+    sibling_d = _real_reference(corpus, keys, subset, exclude_same_group=False)
+    real_d = _real_reference(corpus, keys, subset, exclude_same_group=True)
 
     print(f"\n  generated -> nearest training image")
     print(f"    mean {gen_d.mean():.4f}   min {gen_d.min():.4f}   max {gen_d.max():.4f}")
-    print(f"  training  -> nearest OTHER training image  (the reference)")
+    print(f"  training  -> nearest training image of ANOTHER group  (the reference)")
     print(f"    mean {real_d.mean():.4f}   min {real_d.min():.4f}   p5 {np.percentile(real_d,5):.4f}")
+    print(f"  training  -> nearest OTHER training image, any group  (legacy reference)")
+    print(f"    mean {sibling_d.mean():.4f}   min {sibling_d.min():.4f}   "
+          f"p5 {np.percentile(sibling_d,5):.4f}   ratio gen/legacy = {gen_d.mean() / sibling_d.mean():.3f}")
 
     ratio = gen_d.mean() / real_d.mean()
     print(f"\n  ratio gen/real = {ratio:.3f}")

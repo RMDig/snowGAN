@@ -101,3 +101,19 @@ def test_honoured_split_corpus_is_the_trained_pool(memcheck):
 
 def test_no_trained_pool_falls_back(memcheck):
     assert memcheck._training_groups({"trained_pool": None}) is None
+
+
+def test_cross_group_reference_skips_siblings(memcheck):
+    # Two groups: siblings are 0.01 apart, the groups are 0.5 apart.
+    corpus = np.array([[0.0], [0.01], [0.5], [0.51]], dtype=np.float32)
+    keys = [(3, 1, 1), (3, 1, 1), (3, 1, 2), (3, 1, 2)]
+    sibling = memcheck._real_reference(corpus, keys, [0, 2], exclude_same_group=False)
+    cross = memcheck._real_reference(corpus, keys, [0, 2], exclude_same_group=True)
+    assert np.allclose(sibling, [0.01, 0.01])
+    assert np.allclose(cross, [0.5, 0.49])
+
+
+def test_cross_group_reference_needs_two_groups(memcheck):
+    corpus = np.zeros((3, 1), dtype=np.float32)
+    with pytest.raises(SystemExit):
+        memcheck._real_reference(corpus, [(3, 1, 1)] * 3, [0], exclude_same_group=True)

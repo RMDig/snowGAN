@@ -118,16 +118,22 @@ scoring, full-res export timing) waits.
    which defaults a missing key to True, so for the releases it dropped the
    pools they trained on and compared against sites they never saw).
 
-   Still to settle before scoring (after the arm A2 run frees the GPU):
+   Before scoring (after the arm A2 run frees the GPU):
    - **Core needs an image cache first.** `~/rmdig-cache-1024` holds only the
      2,350 magnified profiles; 845 core images at ~16 MB each is ~13 GB of
      downloads (`scripts/build_image_cache.py`). Magnified-profile can be
      scored as soon as the GPU is free.
    - **The memorisation reference includes same-group neighbours.** Images
      within a group are near-duplicates, so "real -> nearest other real" is
-     mostly a sibling distance, which sets a low bar. Decide whether the
-     reference should exclude same-group neighbours *before* seeing any
-     generator numbers.
+     mostly a sibling distance, which sets a low bar. **Decided 2026-10-02,
+     before any release was scored:** the verdict uses the cross-group
+     reference (nearest real image from a *different* group); the
+     any-neighbour reference is printed alongside for comparability.
+   - **Pre-registered KID criterion (decided 2026-10-02, before scoring):** a
+     release passes if its KID is within 2 standard errors of the real-vs-real
+     floor from the same invocation, where the standard error is
+     sqrt(SE_release² + SE_floor²). Stated once, as this formula; no second
+     form.
    - **The real loader resizes with PIL bilinear**, not the canonical
      `preprocess_image`. That is consistent with every campaign KID so far, so
      it stays as-is for comparability; the release numbers inherit it.
