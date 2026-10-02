@@ -152,6 +152,7 @@ def build_model_card(
     intended_use: str = "",
     limitations: str = "",
     notes: str = "",
+    quality_evidence: str = "",
 ) -> str:
     """Generate the HF Hub model card (README.md) body for a release.
 
@@ -187,7 +188,7 @@ def build_model_card(
     # ambiguity with the YAML parser.
     tags = [
         "gan", "wgan-gp", "image-generation", "snowpack",
-        "transfer-learning", f"modality-{modality}",
+        f"modality-{modality}",
     ]
     tags_yaml = "\n".join(f"  - {t}" for t in tags)
     frontmatter = (
@@ -201,11 +202,17 @@ def build_model_card(
         "---\n\n"
     )
 
+    # No usefulness claim by default. The v0.1.0 cards said the backbone was
+    # "usable for transfer learning" with no measurement behind it, and
+    # snowGradient's 2026-10 probes then found a randomly initialised copy of
+    # the network beats it. A claim belongs in --intended-use / --quality-evidence
+    # only when a measurement backs it.
     default_intended = (
-        f"Primary use case is **transfer learning** — downstream classifiers (e.g. "
-        f"[AvAI](https://github.com/dennys246/AvAI)) attach task heads to the discriminator's "
-        f"Conv3D backbone via `model.get_layer(\"features\").output`. Secondary use is "
-        f"generating synthetic {modality} samples via the generator."
+        f"Research artifact. The discriminator's `features` layer (tap via "
+        f"`model.get_layer(\"features\").output`) and the {modality} generator are "
+        f"published so results can be reproduced and tested. This release does not "
+        f"measure whether the features help any downstream task: compare against a "
+        f"randomly initialised copy of the same architecture before relying on them."
     )
     intended_block = intended_use.strip() or default_intended
 
@@ -219,13 +226,40 @@ def build_model_card(
 
     notes_block = f"\n## Release notes\n\n{notes}\n" if notes.strip() else ""
 
+    quality_block = quality_evidence.strip() or (
+        "None recorded for this release. Training settings (spectral norm, EMA, FID "
+        "interval, ...) are not evidence of quality. The in-training FID uses 64 "
+        "samples against 2048-dimensional features and is not a valid estimate."
+    )
+
+    # Whether the split pools were held out from GAN training. Before
+    # honor_splits existed, batch() ignored the pools and the GAN trained on
+    # its own validation and test groups (UPGRADES #54) -- the v0.1.0 cards said
+    # the opposite. Absent key means the pre-fix behaviour.
+    if disc_cfg.get("honor_splits") is True:
+        splits_intro = (
+            "Splits are deterministic at the `(site, column, core)` group level (seed=42), "
+            "persisted in both sidecar configs, and the validation and test pools were "
+            "excluded from GAN training (`honor_splits=True`):"
+        )
+    else:
+        splits_intro = (
+            "Splits are persisted in both sidecar configs at the `(site, column, core)` "
+            "group level, but **they were not held out from this model**: it was trained "
+            "without `honor_splits`, so the GAN saw its validation and test groups too "
+            "([UPGRADES #54](https://github.com/dennys246/snowGAN/blob/main/docs/UPGRADES.md)):"
+        )
+
     return f"""{frontmatter}# snowGAN — {modality} backbone ({tag})
 
 WGAN-GP trained on the
 [Rocky Mountain Snowpack dataset](https://huggingface.co/datasets/{gen_cfg.get('dataset', 'rmdig/rocky_mountain_snowpack')}),
 single-modality (`{modality}`), depth={depth}, {res_str} resolution.
-Published from the [snowGAN](https://github.com/dennys246/snowGAN) project for
-downstream transfer-learning consumers.
+Published from the [snowGAN](https://github.com/dennys246/snowGAN) project as a
+research artifact.
+
+> **Not for safety decisions.** Nothing here predicts avalanche danger, slope
+> stability or snowpack breakability. Do not use it for any backcountry decision.
 
 ## How to use
 
@@ -297,13 +331,15 @@ At release: `fade_step={fade_step}`.
 
 ### Dataset splits
 
-Splits are deterministic at the `(site, column, core)` group level (seed=42),
-persisted in both sidecar configs so downstream consumers (e.g. AvAI) evaluate
-on the same held-out cores the GAN never saw:
+{splits_intro}
 
 - `trained_pool`: {trained_count} groups
 - `validation_pool`: {val_count} groups
 - `test_pool`: {test_count} groups
+
+## Quality evidence
+
+{quality_block}
 
 ## Limitations
 
@@ -311,7 +347,7 @@ on the same held-out cores the GAN never saw:
 
 ## Files in this release
 
-- `discriminator.weights.h5` — main discriminator weights (the transfer backbone).
+- `discriminator.weights.h5` — main discriminator weights.
 - `discriminator_config.json` — architecture sidecar; pass to `snowgan.models.Discriminator(cfg)`.
 - `generator.weights.h5` + `generator_config.json` — generator weights and sidecar.
 - `generator_ema.weights.h5` — EMA shadow weights (only if EMA was enabled during training).
@@ -327,7 +363,7 @@ Apache 2.0 — see the [snowGAN repository](https://github.com/dennys246/snowGAN
 ## Cross-references
 
 - **Source code**: [github.com/dennys246/snowGAN](https://github.com/dennys246/snowGAN)
-- **Downstream transfer-learning project**: [github.com/dennys246/AvAI](https://github.com/dennys246/AvAI)
+- **Downstream project**: [github.com/dennys246/AvAI](https://github.com/dennys246/AvAI)
 - **Companion modality backbones**:
   [`RMDig/snowGAN-magnified-profile`](https://huggingface.co/RMDig/snowGAN-magnified-profile),
   [`RMDig/snowGAN-core`](https://huggingface.co/RMDig/snowGAN-core)
@@ -377,6 +413,10 @@ def main(argv=None) -> int:
     parser.add_argument("--limitations", default="",
                         help="Override the model card's Limitations section. "
                              "If omitted, a generic per-modality default is generated. Multi-line markdown OK.")
+    parser.add_argument("--quality-evidence", default="",
+                        help="Markdown for the model card's Quality evidence section: measured results "
+                             "only (KID with its real-vs-real floor, memorisation check, probes). If "
+                             "omitted, the card states that none was recorded.")
     parser.add_argument("--create-repo", action="store_true",
                         help="Create the model repo on HF Hub if it doesn't exist.")
     parser.add_argument("--private", action="store_true",
@@ -436,6 +476,7 @@ def main(argv=None) -> int:
         intended_use=args.intended_use,
         limitations=args.limitations,
         notes=args.notes,
+        quality_evidence=args.quality_evidence,
     )
     model_card_path = save_dir / MODEL_CARD_FILENAME
     model_card_path.write_text(model_card_body, encoding="utf-8")

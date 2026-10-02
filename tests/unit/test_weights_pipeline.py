@@ -313,9 +313,16 @@ def test_build_model_card_uses_default_intended_use_and_limitations(release_modu
         intended_use="", limitations="", notes="",
     )
 
-    # Default intended-use mentions AvAI + the features tap
-    assert "transfer learning" in card.lower()
-    assert "AvAI" in card
+    # Default intended-use names the features tap but claims no usefulness:
+    # the v0.1.0 "usable for transfer learning" claim was never measured and
+    # was contradicted downstream (random init beat it, snowGradient 2026-10).
+    assert "`features` layer" in card
+    assert "transfer learning" not in card.lower()
+    assert "transfer-learning" not in card
+    assert "randomly initialised" in card
+    # Safety line is unconditional; quality section says none was recorded.
+    assert "Not for safety decisions" in card
+    assert "None recorded for this release" in card
 
     # Default limitations notes single-modality + dataset caveat
     assert "rmdig/rocky_mountain_snowpack" in card
@@ -532,3 +539,33 @@ def test_release_to_a_repo_that_does_not_exist_yet(release_module, monkeypatch, 
     args = ["--save-dir", str(tmp_path), "--repo", "RMDig/new", "--tag", "v0.1.0", "--create-repo"]
     assert release_module.main(args) == 0
     assert [c[0] for c in api.calls] == ["create_repo", "upload_folder", "create_tag"]
+
+
+def test_model_card_says_splits_were_not_held_out_without_honor_splits(release_module, tmp_path):
+    """The v0.1.0 cards said the GAN "never saw" its held-out cores; it trained
+    on them (UPGRADES #54). Without honor_splits=True the card must say so."""
+    save_dir = tmp_path / "run"
+    _write_minimal_run(save_dir)
+    card = release_module.build_model_card(save_dir, "v0.1.0", "RMDig/x")
+    assert "never saw" not in card
+    assert "they were not held out from this model" in card
+
+
+def test_model_card_states_held_out_splits_with_honor_splits(release_module, tmp_path):
+    save_dir = tmp_path / "run"
+    _write_minimal_run(save_dir)
+    disc = json.loads((save_dir / "discriminator_config.json").read_text())
+    disc["honor_splits"] = True
+    (save_dir / "discriminator_config.json").write_text(json.dumps(disc))
+    card = release_module.build_model_card(save_dir, "v0.2.0", "RMDig/x")
+    assert "excluded from GAN training" in card
+    assert "not held out" not in card
+
+
+def test_model_card_renders_quality_evidence(release_module, tmp_path):
+    save_dir = tmp_path / "run"
+    _write_minimal_run(save_dir)
+    card = release_module.build_model_card(save_dir, "v0.2.0", "RMDig/x",
+                                           quality_evidence="- KID 0.012 ± 0.002 (floor 0.004)")
+    assert "- KID 0.012 ± 0.002 (floor 0.004)" in card
+    assert "None recorded" not in card
