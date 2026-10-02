@@ -112,6 +112,29 @@ scoring, full-res export timing) waits.
    (13 groups, including its "held-out" pools). Pre-registered threshold to be
    stated once, as a number derived from the measured floor, before scoring.
 
+   Built (21c4887): `kid_check.py --sites 3,4,5,6 --real_vs_real`, which
+   refuses any site the sidecar's pools contain, and a corrected
+   `memorization_check.py` corpus (it read `honor_splits` from a built config,
+   which defaults a missing key to True, so for the releases it dropped the
+   pools they trained on and compared against sites they never saw).
+
+   Still to settle before scoring (after the arm A2 run frees the GPU):
+   - **Core needs an image cache first.** `~/rmdig-cache-1024` holds only the
+     2,350 magnified profiles; 845 core images at ~16 MB each is ~13 GB of
+     downloads (`scripts/build_image_cache.py`). Magnified-profile can be
+     scored as soon as the GPU is free.
+   - **The memorisation reference includes same-group neighbours.** Images
+     within a group are near-duplicates, so "real -> nearest other real" is
+     mostly a sibling distance, which sets a low bar. Decide whether the
+     reference should exclude same-group neighbours *before* seeing any
+     generator numbers.
+   - **The real loader resizes with PIL bilinear**, not the canonical
+     `preprocess_image`. That is consistent with every campaign KID so far, so
+     it stays as-is for comparability; the release numbers inherit it.
+   - Sample sizes: 200 generated per release, 10 subsets of 100, and floor
+     halves of the same subset size, so floor and score use one estimator at
+     one n.
+
 Commits 1-4 touch the sidecar contract (2) and add a public surface (1, 3):
 snowGradient and AvAI both read sidecars via `build()` — commit 2 only changes
 what an era-1 sidecar resolves to, which is a fix for both.
