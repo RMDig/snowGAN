@@ -29,6 +29,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -38,8 +39,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import numpy as np  # noqa: E402
 
 
-def _load_real_corpus(config, image_root, probe_size, limit):
-    """Downscaled training images as a single array, plus their identities."""
+def _training_groups(sidecar):
+    """The (site, column, core) groups the run trained on, from its raw sidecar.
+
+    Read from the raw JSON, not a built config: build() defaults a missing
+    `honor_splits` to True, but a sidecar without the key predates the fix, and
+    those runs trained on their validation and test pools too (UPGRADES #54 --
+    both v0.1.0 releases). Leaving those pools out of the corpus, or including
+    sites added after the run, would understate memorization.
+
+    Returns None when the sidecar records no trained_pool.
+    """
+    trained = sidecar.get("trained_pool")
+    if not trained:
+        return None
+    groups = {tuple(int(v) for v in g) for g in trained}
+    if sidecar.get("honor_splits") is not True:
+        for pool in ("validation_pool", "test_pool"):
+            groups |= {tuple(int(v) for v in g) for g in (sidecar.get(pool) or [])}
+    return groups
+
+
+def _load_real_corpus(config, image_root, probe_size, limit, groups=None):
+    """Downscaled training images as a single array, plus their identities.
+
+    `groups` restricts the corpus to the groups the run trained on (see
+    `_training_groups`); None falls back to every image of the modality.
+    """
     from PIL import Image
     from datasets import load_dataset
 
@@ -52,16 +78,9 @@ def _load_real_corpus(config, image_root, probe_size, limit):
     rows = [(i, frame["file_path"][i]) for i, d in enumerate(frame["datatype"])
             if normalize_datatype(d) == wanted]
 
-    # Honour the split the run honoured: comparing against groups the model was
-    # never shown would understate memorization.
-    held_out = set()
-    for pool in ("validation_pool", "test_pool"):
-        for entry in (getattr(config, pool, None) or []):
-            held_out.add(tuple(entry))
-    if held_out and getattr(config, "honor_splits", True):
-        keys = {i: (frame["site"][i], frame["column"][i], frame["core"][i])
-                for i, _ in rows}
-        rows = [(i, fp) for i, fp in rows if keys[i] not in held_out]
+    if groups is not None:
+        rows = [(i, fp) for i, fp in rows
+                if (int(frame["site"][i]), int(frame["column"][i]), int(frame["core"][i])) in groups]
 
     if limit:
         rows = rows[:limit]
@@ -141,10 +160,16 @@ def main():
     generator.model.load_weights(weights)
     print(f"Loaded {weights}")
 
+    with open(os.path.join(args.save_dir, "generator_config.json")) as handle:
+        sidecar = json.load(handle)
+    groups = _training_groups(sidecar)
+    if groups is None:
+        print("WARNING: sidecar records no trained_pool; comparing against every image of the modality.")
     print(f"Loading training corpus at {args.probe_size}px...")
-    corpus, ids = _load_real_corpus(config, args.image_root, args.probe_size, args.limit)
-    print(f"  {len(corpus)} training images (splits honoured: "
-          f"{getattr(config, 'honor_splits', True)})")
+    corpus, ids = _load_real_corpus(config, args.image_root, args.probe_size, args.limit, groups)
+    print(f"  {len(corpus)} training images from "
+          f"{'all groups' if groups is None else f'{len(groups)} trained groups'} "
+          f"(splits honoured: {sidecar.get('honor_splits') is True})")
 
     samples = []
     for i in range(args.n):

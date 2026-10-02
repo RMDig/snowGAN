@@ -10,12 +10,25 @@ Reals are drawn from `validation_pool + test_pool` only. The run honoured
 splits, so those groups were never trained on; scoring against training images
 would measure reproduction, which is `memorization_check.py`'s question.
 
+`--sites` scores against every group from the named sites instead. That is the
+only valid real set for a run that did NOT honour its splits (both v0.1.0
+releases trained on their own pools, UPGRADES #54); the sidecar's pools must
+show no group from those sites, or the script refuses.
+
+`--real_vs_real` first scores two group-disjoint halves of the real set against
+each other. That is the floor: the KID two samples of real images reach, at
+this sample size, with nothing generated involved. A generator's KID means
+something only relative to it.
+
 Usage:
     # one checkpoint (the run's final weights)
     python scripts/kid_check.py keras/snowgan/control_1024/
 
     # sweep, matching the campaign's sampling design
     python scripts/kid_check.py keras/snowgan/control_1024/ --sweep 30000-39000:1000
+
+    # a v0.1.0 release, against sites it never saw, with the real-vs-real floor
+    python scripts/kid_check.py <release_dir> --sites 3,4,5,6 --real_vs_real
 """
 
 import argparse
@@ -29,8 +42,66 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import numpy as np  # noqa: E402
 
 
-def _held_out_reals(config, image_root, limit):
-    """Images from validation+test groups, as a (N, 1, H, W, C) array in [-1, 1]."""
+def _pool_groups(config, pools):
+    groups = set()
+    for pool in pools:
+        for entry in (getattr(config, pool, None) or []):
+            groups.add(tuple(int(v) for v in entry))
+    return groups
+
+
+def _check_sites_unseen(config, sites):
+    """Refuse sites the run's sidecar shows it trained, validated or tested on."""
+    seen = _pool_groups(config, ("trained_pool", "validation_pool", "test_pool"))
+    if not seen:
+        raise SystemExit(
+            "This run's config records no split pools, so there is no record of which "
+            "sites it saw. Refusing to treat any site as unseen.")
+    overlap = sorted({g[0] for g in seen} & set(sites))
+    if overlap:
+        raise SystemExit(f"--sites {sorted(sites)} includes site(s) {overlap} that appear in this "
+                         f"run's split pools; those images are not unseen.")
+
+
+def _select_rows(frame, wanted, held=None, sites=None):
+    """Manifest row indices of datatype `wanted` in the `held` groups or `sites`."""
+    from snowgan.data.dataset import normalize_datatype
+
+    rows = []
+    for index, datatype in enumerate(frame["datatype"]):
+        if normalize_datatype(datatype) != wanted:
+            continue
+        key = (int(frame["site"][index]), int(frame["column"][index]), int(frame["core"][index]))
+        if sites is not None and key[0] not in sites:
+            continue
+        if held is not None and key not in held:
+            continue
+        rows.append((index, key))
+    return rows
+
+
+def _group_halves(keys, seed):
+    """Two boolean masks splitting images into group-disjoint halves.
+
+    Split by (site, column, core) group, not by image: images of one group are
+    near-duplicates, and an image-level split would put the same group on both
+    sides and understate the floor.
+    """
+    groups = sorted(set(keys))
+    if len(groups) < 2:
+        raise SystemExit(f"real-vs-real needs at least 2 groups, found {len(groups)}")
+    order = np.random.default_rng(seed).permutation(len(groups))
+    half_a = {groups[i] for i in order[::2]}
+    mask_a = np.array([k in half_a for k in keys])
+    return mask_a, ~mask_a
+
+
+def _real_images(config, image_root, limit, sites=None, seed=0):
+    """Real images as ((N, 1, H, W, C) array in [-1, 1], group key per image).
+
+    Default: the run's validation+test pools. With `sites`: every group from
+    those sites, after `_check_sites_unseen`.
+    """
     from PIL import Image
     from datasets import load_dataset
     from snowgan.data.dataset import normalize_datatype
@@ -39,36 +110,35 @@ def _held_out_reals(config, image_root, limit):
     frame = dataset.to_pandas().drop(columns=["image", "audio"], errors="ignore")
     wanted = normalize_datatype(getattr(config, "modality", "magnified_profile"))
 
-    held = set()
-    for pool in ("validation_pool", "test_pool"):
-        for entry in (getattr(config, pool, None) or []):
-            held.add(tuple(entry))
-    if not held:
-        raise SystemExit(
-            "This run's config records no validation/test pools, so there is no "
-            "held-out set to score against. Refusing to score against training data.")
+    if sites is not None:
+        _check_sites_unseen(config, sites)
+        rows = _select_rows(frame, wanted, sites=sites)
+    else:
+        held = _pool_groups(config, ("validation_pool", "test_pool"))
+        if not held:
+            raise SystemExit(
+                "This run's config records no validation/test pools, so there is no "
+                "held-out set to score against. Refusing to score against training data.")
+        rows = _select_rows(frame, wanted, held=held)
 
     root = os.path.expanduser(image_root)
+    rows = [(i, k) for i, k in rows if os.path.exists(os.path.join(root, str(frame["file_path"][i])))]
+    if limit and len(rows) > limit:
+        # A random subset, not the first N in manifest order (which is one site).
+        pick = np.random.default_rng(seed).choice(len(rows), size=limit, replace=False)
+        rows = [rows[i] for i in sorted(pick)]
+
     height, width = int(config.resolution[0]), int(config.resolution[1])
-    images = []
-    for index, datatype in enumerate(frame["datatype"]):
-        if normalize_datatype(datatype) != wanted:
-            continue
-        key = (frame["site"][index], frame["column"][index], frame["core"][index])
-        if key not in held:
-            continue
-        path = os.path.join(root, str(frame["file_path"][index]))
-        if not os.path.exists(path):
-            continue
-        with Image.open(path) as handle:
+    images, keys = [], []
+    for index, key in rows:
+        with Image.open(os.path.join(root, str(frame["file_path"][index]))) as handle:
             arr = np.asarray(handle.convert("RGB").resize((width, height), Image.BILINEAR),
                              dtype=np.float32)
         images.append(arr / 127.5 - 1.0)
-        if limit and len(images) >= limit:
-            break
+        keys.append(key)
     if len(images) < 2:
-        raise SystemExit(f"only {len(images)} held-out images resolved under {root}")
-    return np.stack(images)[:, None, ...]
+        raise SystemExit(f"only {len(images)} real images resolved under {root}")
+    return np.stack(images)[:, None, ...], keys
 
 
 def _generate(checkpoint_dir, config_overrides, count, seed, batch=4):
@@ -131,6 +201,12 @@ def main():
     parser.add_argument("--subset_size", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--sweep", default=None, help="'START-END:STEP', e.g. 30000-39000:1000")
+    parser.add_argument("--sites", default=None,
+                        help="Comma-separated site ids to score against instead of the run's "
+                             "held-out pools, e.g. 3,4,5,6. Refused if the run's pools include them.")
+    parser.add_argument("--real_vs_real", action="store_true",
+                        help="Also score two group-disjoint halves of the real set against each "
+                             "other: the floor a generator's KID must be read against.")
     parser.add_argument("--gen_upsampler", default=None, choices=["resize", "transpose"])
     parser.add_argument("--gen_convs_per_resolution", type=int, default=None, choices=[1, 2])
     parser.add_argument("--gen_norm", default=None, choices=["pixel", "batch", "none"])
@@ -152,14 +228,23 @@ def main():
                 os.path.join(scratch, "generator_config.json"))
     base_config = build(os.path.join(scratch, "generator_config.json"))
 
-    print("Loading held-out reals (validation+test groups only)...")
-    reals = _held_out_reals(base_config, args.image_root, args.n_real)
-    print(f"  {len(reals)} held-out images at {list(base_config.resolution)}")
+    sites = {int(v) for v in args.sites.split(",")} if args.sites else None
+    print(f"Loading reals ({f'sites {sorted(sites)}' if sites else 'validation+test groups only'})...")
+    reals, keys = _real_images(base_config, args.image_root, args.n_real, sites=sites, seed=args.seed)
+    print(f"  {len(reals)} images from {len(set(keys))} groups at {list(base_config.resolution)}")
 
     from tensorflow.keras.applications.inception_v3 import InceptionV3
     inception = InceptionV3(include_top=False, pooling="avg", input_shape=(299, 299, 3))
     real_features = inception_features(reals, model=inception)
     print(f"  real features {real_features.shape}")
+
+    if args.real_vs_real:
+        mask_a, mask_b = _group_halves(keys, args.seed)
+        floor = kid_score(real_features[mask_a], real_features[mask_b],
+                          subsets=args.subsets, subset_size=args.subset_size, seed=args.seed)
+        print(f"\n  real-vs-real floor ({mask_a.sum()} vs {mask_b.sum()} images, group-disjoint): "
+              f"KID {floor['kid_mean']:.5f} +/- {floor['kid_se']:.5f} "
+              f"(subset_size {floor['subset_size']})")
 
     rows = []
     print(f"\n{'step':>9} {'KID':>10} {'+/- SE':>9} {'subsets':>8}")
