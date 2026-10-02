@@ -43,11 +43,15 @@ scoring, full-res export timing) waits.
 - **`datatype` is a dead field.** Nothing sets it (no CLI flag, no assignment);
   it is always the template's `"magnified_profile"`. Data selection uses
   `modality`. Since 10cba23 every sidecar's `datatype` is meaningless.
-- **v0.1.0 is an HF tag only** (no git tag, no GitHub release). In both HF repos
-  it was moved from a first "Release v0.1.0" commit to a second one ~50 min
-  later. Weights and generator sidecars are byte-identical (same LFS sha256)
-  across both; only README/MANIFEST and (magnified-profile) the discriminator
-  sidecar's pool lists changed. `release_weights.py` will happily re-tag.
+- **v0.1.0 is an HF tag only** (no git tag, no GitHub release). Each HF repo
+  has two "Release v0.1.0" commits ~50 min apart; weights and generator
+  sidecars are byte-identical (same LFS sha256) across both. The tag objects
+  were created 1 s after the *second* commits, and `create_tag` at fde5671 has
+  no `exist_ok`, so the tag was **not moved by the script**: either the first
+  run never tagged or a tag was deleted by hand (no record). *(Revision 1 said
+  "moved" and "will happily re-tag"; both wrong, caught by the evidence
+  review.)* The real hazard the new guard prevents is a re-run uploading an
+  orphan commit to `main` before `create_tag` fails with 409.
 - **The local `keras/snowgan/core/generator_config.json` is not the release
   copy** — later training rewrote it (`gen_norm: pixel`, fade_step 369267).
   Anything about the core release must read the HF snapshot (8a270f7).
@@ -62,14 +66,24 @@ scoring, full-res export timing) waits.
 2. **Ceiling crossing:** the 3,547 ceiling is `2*sqrt(1*1024*1024*3)`. The
    sustained crossing is ~14-15k (1k-rolling mean last <= 3547 at 14,098;
    5k-window median 3,599 over 13.5-18.5k). **4,357 is a single raw step**
-   (index 13,191), not a level. The GP/lowres caveat does not rescue it: GP >= 0
-   and lowres adds at most 0.5*887 = 443, so any value below -3,991 requires
-   the Wasserstein term itself past the ceiling — 23.5% of steps in 13-18k.
+   (index 13,191), not a level. Their caveat stands, but more weakly than
+   revision 1 said: the logged value adds 0.5x the low-res critic's loss, and
+   that critic had no GP and no SN, so it is unbounded. The log shows that at
+   least one of the two critics broke its bound, not which. *(Revision 1
+   claimed the low-res term was bounded by ~443; wrong.)*
 3. **"Six colour statistics beat the backbone"** is a breakability result
    (RESEARCH_PREVIEW_PLAN.md:23). On modality, colour stats (0.699) score
    *below* the backbone (0.868). NEGATIVE_RESULTS.md is internally consistent;
    the brief conflated the two tasks.
 4. Item 3's fix is on the read side (above), not the write side.
+5. **Their v0.1.0 tag history is also off:** see §1, the tag was not
+   republished; it was created once, on the second commit.
+6. **"Their own test pools were trained on" is true, and broader:** the GAN
+   streamed the dataset's row-level `train` split at the time (1,101 of 1,355
+   magnified profiles, 391 of 495 cores) across all 13 groups.
+7. **Effective λ_gp:** before 2817926 (2026-03-13) the GP was multiplied by λ
+   twice, so the magnified-profile run's configured 10 was an effective 100
+   for the part trained before that date.
 
 ## 3. Commits (this branch: feat/research-preview-asks)
 
