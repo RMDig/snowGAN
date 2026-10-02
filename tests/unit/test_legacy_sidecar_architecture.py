@@ -94,3 +94,24 @@ def test_datatype_mirrors_modality(tmp_path, modality):
     cfg = build(str(_released(tmp_path, modality=modality, datatype="magnified_profile")))
     assert cfg.datatype == modality
     assert cfg.dump()["datatype"] == modality
+
+
+def test_datatype_follows_modality_set_after_configure(tmp_path):
+    # configure_gen/configure_disc set modality from --modality after configure();
+    # a fresh run's first save must not write the template's datatype.
+    path = tmp_path / "generator_config.json"
+    cfg = build(str(path))
+    cfg.modality = "core"
+    cfg.save_config(str(path))
+    assert json.loads(path.read_text())["datatype"] == "core"
+
+
+def test_legacy_resolution_is_announced(tmp_path, capsys):
+    # It runs on trainer resumes too; a silent architecture change is a confound.
+    build(str(_released(tmp_path)))
+    assert "Legacy sidecar" in capsys.readouterr().out
+
+
+def test_current_sidecars_are_not_announced(tmp_path, capsys):
+    build(str(_released(tmp_path, gen_norm="pixel")))
+    assert "Legacy sidecar" not in capsys.readouterr().out

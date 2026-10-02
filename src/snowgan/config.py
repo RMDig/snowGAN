@@ -171,16 +171,29 @@ def _resolve_pre_gen_norm_architecture(config_json):
     the current defaults it resolves to resize-upsampling with two convs, and
     its weights no longer load.
 
-    Keyed on the *absence of the key*, which only a pre-b4e0677 writer
-    produces; dump() has written gen_norm ever since. Later eras need nothing:
-    a sidecar from b4e0677..1a925d4 really is resize + 2 convs, and one from
-    1a925d4..6ceda9e really is 2 convs. gen_norm itself is already derived
-    from batch_norm in configure().
+    Keyed on the *absence of the key*; dump() has written gen_norm ever since
+    b4e0677. One exception exists in history: 6549431, four minutes before
+    b4e0677, built resize + 1 conv without writing gen_norm. No run trained on
+    it, but a sidecar from it would resolve wrongly here. Later eras need
+    nothing: a sidecar from b4e0677..1a925d4 really is resize + 2 convs, and
+    one from 1a925d4..6ceda9e really is 2 convs. gen_norm itself is already
+    derived from batch_norm in configure().
+
+    This runs on every load, the trainer's included, so resuming (or reusing as
+    a starting config) any pre-b4e0677 save_dir now builds the v0.1 generator
+    rather than the current default. It says so on stdout, because a silent
+    architecture change is a confound (CLAUDE.md §9).
     """
     if "gen_norm" in config_json:
         return
-    config_json.setdefault("gen_upsampler", "transpose")
-    config_json.setdefault("gen_convs_per_resolution", 1)
+    resolved = {}
+    for key, value in (("gen_upsampler", "transpose"), ("gen_convs_per_resolution", 1)):
+        if key not in config_json:
+            config_json[key] = resolved[key] = value
+    if resolved:
+        print(f"Legacy sidecar (written before gen_norm existed, pre-b4e0677): generator "
+              f"architecture resolved to the v0.1 stack {resolved}. Override with "
+              f"--gen_upsampler / --gen_convs_per_resolution.")
 
 
 class build:
@@ -253,6 +266,18 @@ class build:
             self.enable_autosave()
 
         
+    @property
+    def datatype(self):
+        """Dead alias of ``modality``, kept in dump() for readers that expect the key.
+
+        Nothing has set it since 10cba23 (no CLI flag, no assignment) and nothing
+        reads it, so every sidecar carried the template's "magnified_profile" --
+        including the core release's. A property, not a field, so it cannot
+        drift from modality even when modality is set after configure() (as
+        configure_gen / configure_disc do from --modality).
+        """
+        return self.modality
+
     def __repr__(self):
         return '\n'.join([f"{key}: {value}" for key, value in self.__dict__.items()])
     
@@ -333,12 +358,6 @@ class build:
         #-------------------------------- Model Set-Up -------------------------------#
         self.save_dir = _normalize_save_dir(save_dir)
         self.dataset = dataset or "dennys246/rocky_mountain_snowpack"
-        # `datatype` is a dead alias of `modality`: nothing has set it since
-        # 10cba23 (no CLI flag, no assignment) and nothing reads it, so every
-        # sidecar carried the template's "magnified_profile" -- including the
-        # core release's. Derive it so the file cannot contradict itself; it
-        # stays in dump() for readers that expect the key.
-        self.datatype = str(modality) if modality else "magnified_profile"
         self.architecture = architecture or "generator"
         self.resolution = resolution or (1024, 1024)
         self.channels = int(channels) if channels is not None else 3
