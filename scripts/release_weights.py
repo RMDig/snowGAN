@@ -335,6 +335,17 @@ Apache 2.0 — see the [snowGAN repository](https://github.com/dennys246/snowGAN
 {notes_block}"""
 
 
+def _tag_exists(api, repo: str, tag: str) -> bool:
+    """True if ``repo`` already carries ``tag``. A repo that does not exist yet has no tags."""
+    from huggingface_hub.utils import RepositoryNotFoundError
+
+    try:
+        refs = api.list_repo_refs(repo_id=repo, repo_type="model")
+    except RepositoryNotFoundError:
+        return False
+    return any(ref.name == tag for ref in refs.tags)
+
+
 def _validate_required(save_dir: Path) -> list[str]:
     return [a for a in REQUIRED_ARTIFACTS if not (save_dir / a).exists()]
 
@@ -386,6 +397,31 @@ def main(argv=None) -> int:
             print(f"  - {m}", file=sys.stderr)
         return 1
 
+    # Resolve the hub client and refuse an existing tag BEFORE writing
+    # MANIFEST.md / README.md into save_dir, so a refused release leaves
+    # nothing modified.
+    api = None
+    if not args.dry_run:
+        try:
+            from huggingface_hub import HfApi
+        except ImportError:
+            print(
+                "error: huggingface_hub not installed. "
+                "Install with `pip install snowgan[hub]` or `pip install huggingface_hub`.",
+                file=sys.stderr,
+            )
+            return 1
+        api = HfApi()
+        if _tag_exists(api, args.repo, args.tag):
+            print(
+                f"error: {args.repo} already has tag {args.tag}. Released tags are "
+                f"immutable: consumers pin them, and moving one leaves two different "
+                f"snapshots under one name (v0.1.0 was moved this way on 2026-06-03). "
+                f"Release under a new tag instead.",
+                file=sys.stderr,
+            )
+            return 1
+
     manifest_body = build_manifest(save_dir, args.tag, args.notes).replace(
         "{repo}", args.repo
     )
@@ -415,18 +451,6 @@ def main(argv=None) -> int:
     if args.dry_run:
         print("[release] dry-run: not uploading.")
         return 0
-
-    try:
-        from huggingface_hub import HfApi
-    except ImportError:
-        print(
-            "error: huggingface_hub not installed. "
-            "Install with `pip install snowgan[hub]` or `pip install huggingface_hub`.",
-            file=sys.stderr,
-        )
-        return 1
-
-    api = HfApi()
 
     if args.create_repo:
         api.create_repo(

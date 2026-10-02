@@ -472,3 +472,63 @@ def test_main_exits_nonzero_when_required_artifacts_missing(release_module, tmp_
     err = capsys.readouterr().err
     assert "missing required artifacts" in err
     assert "generator.weights.h5" in err
+
+
+# ----------------------------------------------------------------------
+# Released tags are immutable. v0.1.0 was moved on both HF repos on
+# 2026-06-03 (weights identical, metadata changed), leaving two snapshots
+# under one name; the script must refuse to do that again.
+# ----------------------------------------------------------------------
+
+class _FakeHfApi:
+    def __init__(self, tags=(), missing=False):
+        self.tags, self.missing, self.calls = list(tags), missing, []
+
+    def list_repo_refs(self, repo_id, repo_type):
+        if self.missing:
+            from huggingface_hub.utils import RepositoryNotFoundError
+            # Its constructor wants a live HTTP response; the type is what matters.
+            raise RepositoryNotFoundError.__new__(RepositoryNotFoundError)
+        return types.SimpleNamespace(tags=[types.SimpleNamespace(name=t) for t in self.tags])
+
+    def upload_folder(self, **kwargs):
+        self.calls.append(("upload_folder", kwargs["repo_id"]))
+
+    def create_tag(self, **kwargs):
+        self.calls.append(("create_tag", kwargs["tag"]))
+
+    def create_repo(self, **kwargs):
+        self.calls.append(("create_repo", kwargs["repo_id"]))
+
+
+def _patch_api(monkeypatch, api):
+    huggingface_hub = pytest.importorskip("huggingface_hub")
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: api)
+
+
+def test_release_refuses_an_existing_tag_and_writes_nothing(release_module, monkeypatch, tmp_path, capsys):
+    api = _FakeHfApi(tags=["v0.1.0"])
+    _patch_api(monkeypatch, api)
+    _write_minimal_run(tmp_path)
+    rc = release_module.main(["--save-dir", str(tmp_path), "--repo", "RMDig/x", "--tag", "v0.1.0"])
+    assert rc == 1
+    assert api.calls == []
+    assert not (tmp_path / "MANIFEST.md").exists() and not (tmp_path / "README.md").exists()
+    assert "immutable" in capsys.readouterr().err
+
+
+def test_release_uploads_and_tags_a_new_tag(release_module, monkeypatch, tmp_path):
+    api = _FakeHfApi(tags=["v0.1.0"])
+    _patch_api(monkeypatch, api)
+    _write_minimal_run(tmp_path)
+    assert release_module.main(["--save-dir", str(tmp_path), "--repo", "RMDig/x", "--tag", "v0.1.1"]) == 0
+    assert api.calls == [("upload_folder", "RMDig/x"), ("create_tag", "v0.1.1")]
+
+
+def test_release_to_a_repo_that_does_not_exist_yet(release_module, monkeypatch, tmp_path):
+    api = _FakeHfApi(missing=True)
+    _patch_api(monkeypatch, api)
+    _write_minimal_run(tmp_path)
+    args = ["--save-dir", str(tmp_path), "--repo", "RMDig/new", "--tag", "v0.1.0", "--create-repo"]
+    assert release_module.main(args) == 0
+    assert [c[0] for c in api.calls] == ["create_repo", "upload_folder", "create_tag"]
