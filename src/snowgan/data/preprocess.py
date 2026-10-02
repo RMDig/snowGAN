@@ -1,12 +1,30 @@
 """Per-image preprocessing: the op the on-device pipeline must reproduce exactly.
 
-TensorFlow + NumPy only, so a consumer (the AvApp's golden-image parity test)
-can call the canonical reference without the HF dataset stack or a DataManager.
+A consumer (the AvApp's golden-image parity test) can call the canonical
+reference without constructing a DataManager or loading the dataset. This
+module's own code needs only TensorFlow and NumPy, but importing it runs
+``snowgan/__init__``, which imports the rest of the package (and so ``datasets``
+and matplotlib) -- install the package, don't vendor this file expecting less.
 ``DataManager.preprocess_image`` delegates here; there is one implementation.
+
+The contract, as trained (bump ``PREPROCESS_VERSION`` if any of it changes):
+
+- **Whole-frame squash, not letterbox.** The frame is resized to the target
+  (height, width) regardless of aspect ratio.
+- **Bilinear, antialias off** (``tf.image.resize`` defaults), applied to
+  [0, 255] values, before anything else but channel coercion.
+- **No EXIF orientation is applied.** Pixels are used in stored order.
+- **Board mask** (optional) after the resize, in [0, 255], then
+  ``x / 127.5 - 1`` to [-1, 1], float32, 3 channels.
 """
 
 import numpy as np
 import tensorflow as tf
+
+# Version of the contract in the module docstring. Consumers that record which
+# preprocessing a model expects (the AvApp model manifest's
+# `preprocessingVersion`) should store this.
+PREPROCESS_VERSION = 1
 
 
 # --- Blue measurement-board masking (core modality) ---------------------------
@@ -53,7 +71,7 @@ def mask_blue_board(image_255):
 
 
 def _to_rgb(image):
-    """Coerce an image to 3 channels BEFORE resize.
+    """Coerce one image to 3 channels BEFORE resize.
 
     Order matters: ``tf.image.resize`` rejects rank-2 input, so a grayscale
     frame must gain its channel axis first. The models are built for
@@ -63,17 +81,27 @@ def _to_rgb(image):
     # PIL: let PIL do the mode conversion (handles L, LA, P, RGBA, CMYK ...).
     # RGBA -> RGB drops alpha without compositing, matching the tensor path.
     if hasattr(image, "mode") and hasattr(image, "convert"):
+        if image.mode not in ("RGB", "RGBA", "L", "LA", "P", "CMYK", "YCbCr"):
+            # I, I;16, F: 16/32-bit modes that convert() clips to 8 bits.
+            raise ValueError(f"preprocess_image expects an 8-bit image, got PIL mode {image.mode!r}.")
         if image.mode != "RGB":
             image = image.convert("RGB")
         return tf.convert_to_tensor(np.array(image))
 
     if not isinstance(image, tf.Tensor):
         image = tf.convert_to_tensor(np.asarray(image))
+    # Values must be on the [0, 255] scale. uint8 and floats are accepted
+    # (floats are trusted to be 0-255, not 0-1: checking would need a device
+    # sync per image in the training hot loop). Other integer types (uint16
+    # from a 16-bit PNG) are a different scale and are refused.
+    if not (image.dtype == tf.uint8 or image.dtype.is_floating):
+        raise ValueError(f"preprocess_image expects uint8 or float in [0, 255], got {image.dtype.name}.")
     rank = image.shape.rank
     if rank == 2:
         image = image[..., None]
     elif rank != 3:
-        raise ValueError(f"preprocess_image expects one (H, W) or (H, W, C) image, got shape {image.shape}.")
+        raise ValueError(f"preprocess_image expects one (H, W) or (H, W, C) image, got shape {image.shape}. "
+                         "(tf.io.decode_image needs expand_animations=False to guarantee rank 3.)")
     channels = image.shape[-1]
     if channels == 3:
         return image
@@ -81,15 +109,27 @@ def _to_rgb(image):
         return tf.image.grayscale_to_rgb(image)
     if channels == 4:
         return image[..., :3]
+    if channels is None:
+        # Graph mode with an unknown channel count (tf.io.decode_png with the
+        # default channels=0): decide at run time, then pin the static shape.
+        n = tf.shape(image)[-1]
+        image = tf.case([(tf.equal(n, 1), lambda: tf.image.grayscale_to_rgb(image)),
+                         (tf.equal(n, 4), lambda: image[..., :3])],
+                        default=lambda: image)
+        return tf.ensure_shape(image, [None, None, 3])
     raise ValueError(f"preprocess_image expects 1, 3 or 4 channels, got shape {image.shape}.")
 
 
 def preprocess_image(image, resolution, *, mask_board=False):
     """Resize the whole frame, optionally mask the board, scale to [-1, 1].
 
+    See the module docstring for the exact contract (squash, bilinear without
+    antialias, no EXIF orientation) and ``PREPROCESS_VERSION``.
+
     Args:
-        image: one image in [0, 255] -- a PIL image, array or tensor of shape
-            (H, W), (H, W, 1), (H, W, 3) or (H, W, 4).
+        image: one image on the [0, 255] scale -- a PIL image, or a uint8 or
+            float array / tensor of shape (H, W), (H, W, 1), (H, W, 3) or
+            (H, W, 4).
         resolution: (height, width) to resize to.
         mask_board: replace the blue measurement board with neutral grey. Runs
             after the resize and BEFORE the rescale, while pixels are still in

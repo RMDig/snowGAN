@@ -9,7 +9,10 @@ constructor loads the HF dataset). These tests pin three things:
 2. Grayscale and RGBA frames become 3-channel BEFORE resize. Previously a rank-2
    frame raised inside tf.image.resize (the expand_dims after it was dead code)
    and RGBA passed through as 4 channels.
-3. The module stays importable without the dataset stack.
+3. The module's own code depends only on NumPy and TensorFlow (importing it
+   still runs the package __init__; the module docstring says so).
+4. It works inside tf.data / tf.function, where a decoded PNG's channel count
+   is unknown until run time.
 """
 
 import ast
@@ -82,13 +85,35 @@ def test_pil_modes_match_the_rgb_conversion(mode):
     assert np.array_equal(pp.preprocess_image(converted, [16, 16]).numpy(), expected)
 
 
-@pytest.mark.parametrize("bad", [np.zeros((8, 8, 2)), np.zeros((2, 8, 8, 3))])
+@pytest.mark.parametrize("bad", [np.zeros((8, 8, 2)), np.zeros((2, 8, 8, 3)),
+                                 np.zeros((8, 8, 3), np.uint16)])
 def test_unsupported_shapes_raise(bad):
     with pytest.raises(ValueError):
         pp.preprocess_image(bad, [4, 4])
 
 
-def test_module_imports_only_numpy_and_tensorflow():
+def test_16_bit_pil_modes_are_refused_not_clipped():
+    with pytest.raises(ValueError, match="8-bit"):
+        pp.preprocess_image(Image.fromarray(np.full((8, 8), 40000, np.uint16)), [4, 4])
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4])
+def test_graph_mode_with_unknown_channels(channels):
+    rgb = _frame(16, 16)
+    arr = {1: rgb[..., :1], 3: rgb, 4: np.concatenate([rgb, rgb[..., :1]], -1)}[channels]
+    png = tf.io.encode_png(arr)
+    ds = tf.data.Dataset.from_tensors(png).map(
+        lambda b: pp.preprocess_image(tf.io.decode_png(b), [8, 8]))  # channels=0: unknown
+    got = next(iter(ds)).numpy()
+    assert got.shape == (8, 8, 3)
+    assert np.array_equal(got, pp.preprocess_image(arr, [8, 8]).numpy())
+
+
+def test_contract_version_is_exposed():
+    assert pp.PREPROCESS_VERSION == 1
+
+
+def test_module_own_imports_are_only_numpy_and_tensorflow():
     tree = ast.parse(inspect.getsource(pp))
     imported = set()
     for node in ast.walk(tree):
