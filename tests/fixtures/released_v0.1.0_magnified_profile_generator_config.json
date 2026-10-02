@@ -1,0 +1,141 @@
+{
+    "save_dir": "keras/snowgan/",
+    "checkpoint": "keras/snowgan/generator.keras",
+    "dataset": "rmdig/rocky_mountain_snowpack",
+    "datatype": "magnified_profile",
+    "architecture": "generator",
+    "resolution": [
+        1024,
+        1024
+    ],
+    "channels": 3,
+    "depth": 1,
+    "images": null,
+    "trained_pool": [
+        [
+            2,
+            1,
+            3
+        ],
+        [
+            2,
+            1,
+            2
+        ],
+        [
+            1,
+            1,
+            2
+        ],
+        [
+            2,
+            1,
+            5
+        ],
+        [
+            2,
+            1,
+            8
+        ],
+        [
+            2,
+            1,
+            1
+        ],
+        [
+            2,
+            1,
+            7
+        ],
+        [
+            2,
+            1,
+            4
+        ],
+        [
+            1,
+            1,
+            3
+        ],
+        [
+            1,
+            1,
+            4
+        ]
+    ],
+    "validation_pool": [
+        [
+            0,
+            1,
+            1
+        ]
+    ],
+    "test_pool": [
+        [
+            1,
+            1,
+            1
+        ],
+        [
+            2,
+            1,
+            6
+        ]
+    ],
+    "model_history": null,
+    "n_samples": 10,
+    "epochs": 10,
+    "current_epoch": 0,
+    "batch_size": 4,
+    "training_steps": 3,
+    "learning_rate": 0.0001,
+    "beta_1": 0.5,
+    "beta_2": 0.9,
+    "negative_slope": 0.25,
+    "lambda_gp": 10.0,
+    "latent_dim": 100,
+    "convolution_depth": 5,
+    "filter_counts": [
+        1024,
+        512,
+        256,
+        128,
+        64
+    ],
+    "kernel_size": [
+        3,
+        3
+    ],
+    "kernel_stride": [
+        2,
+        2
+    ],
+    "batch_norm": false,
+    "final_activation": "tanh",
+    "zero_padding": null,
+    "padding": "same",
+    "optimizer": "adam",
+    "loss": null,
+    "train_ind": 876,
+    "trained_data": [],
+    "seen_profiles": [],
+    "rebuild": false,
+    "fade": false,
+    "fade_steps": 50000,
+    "fade_step": 428139,
+    "cleanup_milestone": 1000,
+    "spectral_norm": true,
+    "augment": true,
+    "lr_decay": "cosine",
+    "lr_min": 1e-07,
+    "ema_decay": 0.999,
+    "fid_interval": 5000,
+    "multiscale_disc": true,
+    "grad_clip_norm": 1.0,
+    "ada_target": 0.6,
+    "adaptive_steps": true,
+    "seed": 42,
+    "modality": "magnified_profile",
+    "sample_epoch_interval": 1,
+    "sample_batch_interval": 10
+}
