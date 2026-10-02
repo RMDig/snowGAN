@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
@@ -60,7 +61,7 @@ def _training_groups(sidecar):
     return groups
 
 
-def _load_real_corpus(config, image_root, probe_size, limit, groups=None):
+def _load_real_corpus(config, image_root, probe_size, limit, groups=None, seed=0):
     """Downscaled training images, their file paths, and their (site, column, core) groups.
 
     `groups` restricts the corpus to the groups the run trained on (see
@@ -82,8 +83,11 @@ def _load_real_corpus(config, image_root, probe_size, limit, groups=None):
         rows = [(i, fp) for i, fp in rows
                 if (int(frame["site"][i]), int(frame["column"][i]), int(frame["core"][i])) in groups]
 
-    if limit:
-        rows = rows[:limit]
+    if limit and len(rows) > limit:
+        # A random subset: manifest order is site order, so the first N rows
+        # would be one or two groups and starve the cross-group reference.
+        pick = np.random.default_rng(seed).choice(len(rows), size=limit, replace=False)
+        rows = [rows[i] for i in sorted(pick)]
 
     images, ids, keys = [], [], []
     root = os.path.expanduser(image_root) if image_root else None
@@ -152,6 +156,8 @@ def main():
     parser.add_argument("--probe_size", type=int, default=128)
     parser.add_argument("--limit", type=int, default=0, help="cap corpus size (0 = all)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--weights_file", default="generator.weights.h5",
+                        help="Generator weights to check, e.g. generator_ema.weights.h5.")
     parser.add_argument("--gen_upsampler", default=None, choices=["resize", "transpose"])
     parser.add_argument("--gen_convs_per_resolution", type=int, default=None, choices=[1, 2])
     parser.add_argument("--gen_norm", default=None, choices=["pixel", "batch", "none"])
@@ -165,12 +171,11 @@ def main():
     from snowgan.checkpoint import resolve_weights_path
 
     # Read the config from a copy: loading a save_dir must not rewrite it.
-    scratch = "/tmp/_memcheck_cfg"
-    shutil.rmtree(scratch, ignore_errors=True)
-    os.makedirs(scratch, exist_ok=True)
+    scratch = tempfile.mkdtemp(prefix="memcheck_cfg_")
     shutil.copy(os.path.join(args.save_dir, "generator_config.json"),
                 os.path.join(scratch, "generator_config.json"))
     config = build(os.path.join(scratch, "generator_config.json"))
+    shutil.rmtree(scratch, ignore_errors=True)
     for key, value in (("gen_upsampler", args.gen_upsampler),
                        ("gen_convs_per_resolution", args.gen_convs_per_resolution),
                        ("gen_norm", args.gen_norm)):
@@ -180,7 +185,7 @@ def main():
     tf.keras.utils.set_random_seed(args.seed)
     generator = Generator(config)
     generator.model.build((None, config.latent_dim))
-    weights = resolve_weights_path(os.path.join(args.save_dir, "generator.weights.h5"))
+    weights = resolve_weights_path(os.path.join(args.save_dir, args.weights_file))
     generator.model.load_weights(weights)
     print(f"Loaded {weights}")
 
@@ -190,7 +195,8 @@ def main():
     if groups is None:
         print("WARNING: sidecar records no trained_pool; comparing against every image of the modality.")
     print(f"Loading training corpus at {args.probe_size}px...")
-    corpus, ids, keys = _load_real_corpus(config, args.image_root, args.probe_size, args.limit, groups)
+    corpus, ids, keys = _load_real_corpus(config, args.image_root, args.probe_size, args.limit, groups,
+                                          seed=args.seed)
     print(f"  {len(corpus)} training images from "
           f"{'all groups' if groups is None else f'{len(groups)} trained groups'} "
           f"(splits honoured: {sidecar.get('honor_splits') is True})")

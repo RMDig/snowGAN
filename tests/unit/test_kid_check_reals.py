@@ -117,3 +117,13 @@ def test_cross_group_reference_needs_two_groups(memcheck):
     corpus = np.zeros((3, 1), dtype=np.float32)
     with pytest.raises(SystemExit):
         memcheck._real_reference(corpus, [(3, 1, 1)] * 3, [0], exclude_same_group=True)
+
+
+# --- the pre-registered criterion -------------------------------------------
+# Fixed 2026-10-02, before either release was scored: pass iff
+# |KID - floor| <= 2 * sqrt(SE_kid^2 + SE_floor^2).
+
+def test_floor_verdict_pass_and_fail(kid_check):
+    floor = {"kid_mean": 0.010, "kid_se": 0.003}
+    assert kid_check._floor_verdict({"kid_mean": 0.017, "kid_se": 0.004}, floor).startswith("PASS")  # bound 0.010
+    assert kid_check._floor_verdict({"kid_mean": 0.021, "kid_se": 0.004}, floor).startswith("FAIL")

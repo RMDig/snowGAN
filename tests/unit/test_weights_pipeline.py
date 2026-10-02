@@ -558,7 +558,7 @@ def test_model_card_states_held_out_splits_with_honor_splits(release_module, tmp
     disc["honor_splits"] = True
     (save_dir / "discriminator_config.json").write_text(json.dumps(disc))
     card = release_module.build_model_card(save_dir, "v0.2.0", "RMDig/x")
-    assert "excluded from GAN training" in card
+    assert "were excluded from GAN training" in card
     assert "not held out" not in card
 
 

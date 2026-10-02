@@ -237,10 +237,14 @@ def build_model_card(
     # its own validation and test groups (UPGRADES #54) -- the v0.1.0 cards said
     # the opposite. Absent key means the pre-fix behaviour.
     if disc_cfg.get("honor_splits") is True:
+        # Necessary, not sufficient: build() backfills honor_splits=True on a
+        # legacy sidecar, so a run that started before the fix and resumed
+        # after it records True although its early steps saw these pools.
         splits_intro = (
-            "Splits are deterministic at the `(site, column, core)` group level (seed=42), "
-            "persisted in both sidecar configs, and the validation and test pools were "
-            "excluded from GAN training (`honor_splits=True`):"
+            "Splits are deterministic at the `(site, column, core)` group level (seed=42) "
+            "and persisted in both sidecar configs. The sidecar records `honor_splits=True`, "
+            "meaning the validation and test pools were excluded from GAN training for at "
+            "least the steps run under that setting:"
         )
     else:
         splits_intro = (
@@ -409,7 +413,8 @@ def main(argv=None) -> int:
                              "(e.g. \"trained to fade_step 428k with all advanced flags\").")
     parser.add_argument("--intended-use", default="",
                         help="Override the model card's Intended use section. "
-                             "If omitted, a sensible default referencing transfer learning is generated.")
+                             "If omitted, the default describes a research artifact and makes no claim that "
+                             "the features are useful downstream.")
     parser.add_argument("--limitations", default="",
                         help="Override the model card's Limitations section. "
                              "If omitted, a generic per-modality default is generated. Multi-line markdown OK.")
@@ -455,9 +460,8 @@ def main(argv=None) -> int:
         if _tag_exists(api, args.repo, args.tag):
             print(
                 f"error: {args.repo} already has tag {args.tag}. Released tags are "
-                f"immutable: consumers pin them, and moving one leaves two different "
-                f"snapshots under one name (v0.1.0 was moved this way on 2026-06-03). "
-                f"Release under a new tag instead.",
+                f"immutable: consumers pin them. Checked before uploading, so a refused "
+                f"release leaves no orphan commit on main. Release under a new tag instead.",
                 file=sys.stderr,
             )
             return 1
@@ -490,7 +494,7 @@ def main(argv=None) -> int:
         print(f"  - {f}  ({size_mb:.1f} MB)")
 
     if args.dry_run:
-        print("[release] dry-run: not uploading.")
+        print("[release] dry-run: not uploading (and not checking whether the tag already exists).")
         return 0
 
     if args.create_repo:
