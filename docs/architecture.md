@@ -456,8 +456,15 @@ a CPU-only kernel with no int8 and no GPU / NNAPI / Core ML delegate.
 `snowgan.export.to_conv2d(model)` rebuilds a **depth-1** model with Conv2D /
 Conv2DTranspose layers and the same weights. Inputs and outputs become
 `(B, H, W, C)`, and the discriminator keeps `Flatten(name="features")`.
-`export_tflite` writes it as TFLite via ExportArchive -> SavedModel. CLI:
-`python -m snowgan.export --kind ... --sidecar ... --weights ... --out x.tflite`.
+`export_tflite` writes it as TFLite via ExportArchive -> SavedModel. A TFLite
+file has one output: for the full discriminator that is the critic score, so
+a backbone for a downstream head is exported with `features_only=True`
+(optionally at another `input_hw`, e.g. 256x256; conv weights do not depend on
+resolution, the critic's Dense head does). Every rebuilt layer is float32. CLI:
+`python -m snowgan.export --kind ... --sidecar ... --weights ... --out x.tflite
+[--features [--resolution H W]]`; it checks the export against the Conv3D
+model at batch 1 and runs the written `.tflite`, with gates relative to the
+output's scale.
 
 The export is exact only because of invariants this repo currently holds. A
 change that breaks one of them breaks the export, and

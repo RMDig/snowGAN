@@ -181,3 +181,97 @@ def test_cli_exports_from_sidecar_and_weights(tmp_path):
     assert np.max(np.abs(_run_tflite(out, x[:, 0]) - d.model(x, training=False).numpy())) <= TOL
     assert sidecar.read_text() == before  # read-only: the sidecar is never rewritten
     assert json.loads(before)["filter_counts"] == [8, 16]
+
+
+# --- review fixes (2026-10-02) ----------------------------------------------
+
+def test_features_only_matches_and_stops_at_features():
+    d = Discriminator(_cfg(filter_counts=[8, 16], spectral_norm=True))
+    x = _images()
+    d.model(x, training=True)
+    m2 = to_conv2d(d, features_only=True)
+    assert m2.layers[-1].name == "features"
+    f3 = keras.Model(d.model.input, d.model.get_layer("features").output)(x, training=False).numpy()
+    assert np.max(np.abs(f3 - m2(x[:, 0], training=False).numpy())) <= TOL
+
+
+def test_features_at_another_resolution_match_a_conv3d_model_built_there():
+    d64 = Discriminator(_cfg(filter_counts=[8, 16]))
+    d32 = Discriminator(_cfg(filter_counts=[8, 16], resolution=[32, 32]))
+    # Same conv weights at 32 px; the Dense head is the only size-dependent layer.
+    for a, b in zip(d64.model.layers, d32.model.layers):
+        if not isinstance(a, keras.layers.Dense) and a.get_weights():
+            b.set_weights(a.get_weights())
+    x = _images(size=32)
+    want = keras.Model(d32.model.input, d32.model.get_layer("features").output)(x).numpy()
+    got = to_conv2d(d64, features_only=True, input_hw=(32, 32))(x[:, 0]).numpy()
+    assert np.max(np.abs(want - got)) <= TOL
+
+
+def test_input_hw_without_features_only_is_refused():
+    with pytest.raises(ValueError, match="features_only"):
+        to_conv2d(Discriminator(_cfg(filter_counts=[8])), input_hw=(32, 32))
+
+
+def test_export_is_float32_under_a_mixed_precision_policy(tmp_path):
+    g = Generator(_cfg(gen_upsampler="transpose", gen_convs_per_resolution=1, gen_norm="batch", batch_norm=True))
+    z = np.random.default_rng(4).standard_normal((1, 16)).astype(np.float32)
+    want = g.model(z, training=False).numpy()[:, 0]
+    keras.mixed_precision.set_global_policy("mixed_float16")
+    try:
+        m2 = to_conv2d(g)
+        path = export_tflite(m2, str(tmp_path / "g.tflite"))
+    finally:
+        keras.mixed_precision.set_global_policy("float32")
+    assert {l.dtype_policy.name for l in m2.layers if l.weights} == {"float32"}
+    assert np.max(np.abs(_run_tflite(path, z) - want)) <= TOL
+
+
+def test_pixelnorm_export_reloads_as_keras(tmp_path):
+    m2 = to_conv2d(Generator(_cfg(gen_norm="pixel")))
+    path = str(tmp_path / "g.keras")
+    m2.save(path)
+    z = np.random.default_rng(5).standard_normal((1, 16)).astype(np.float32)
+    assert np.array_equal(keras.models.load_model(path)(z).numpy(), m2(z).numpy())
+
+
+def _cli_run(tmp_path, scale=1.0, extra=()):
+    from snowgan.config import build
+    from snowgan.export import main
+
+    sidecar = tmp_path / "discriminator_config.json"
+    cfg = build(str(sidecar))
+    cfg.filter_counts, cfg.resolution = [8, 16], [32, 32]
+    cfg.save_config(str(sidecar))
+    d = Discriminator(build(str(sidecar)))
+    dense = d.model.layers[-1]
+    dense.set_weights([w * scale for w in dense.get_weights()])
+    weights = tmp_path / "discriminator.weights.h5"
+    d.model.save_weights(str(weights))
+    out = tmp_path / "d.tflite"
+    main(["--kind", "discriminator", "--sidecar", str(sidecar), "--weights", str(weights),
+          "--out", str(out), *extra])
+    return d, out
+
+
+def test_cli_gate_is_relative_to_the_output_scale(tmp_path):
+    # The core critic scores ~2300, where float32 spacing alone is 2.4e-4; an
+    # absolute 1e-5 gate refused a correct export depending on batch size.
+    d, out = _cli_run(tmp_path, scale=1e4)
+    x = _images(n=1, size=32)
+    want = d.model(x, training=False).numpy()
+    assert np.abs(want).max() > 100
+    assert np.max(np.abs(_run_tflite(out, x[:, 0]) - want)) / np.abs(want).max() <= 1e-3
+
+
+def test_cli_features_at_phone_resolution(tmp_path):
+    _, out = _cli_run(tmp_path, extra=("--features", "--resolution", "16", "16"))
+    got = _run_tflite(out, np.zeros((1, 16, 16, 3), np.float32))
+    assert got.shape == (1, 4 * 4 * 16)
+
+
+def test_cli_refuses_a_missing_sidecar(tmp_path):
+    from snowgan.export import main
+    with pytest.raises(SystemExit, match="not found"):
+        main(["--kind", "generator", "--sidecar", str(tmp_path / "nope.json"),
+              "--weights", "x.h5", "--out", str(tmp_path / "g.tflite")])
