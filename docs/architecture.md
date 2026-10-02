@@ -15,6 +15,7 @@ Technical reference for snowGAN's model architectures, training pipeline, and in
 - [Data Pipeline](#data-pipeline)
 - [Configuration System](#configuration-system)
 - [Checkpoint & Persistence](#checkpoint--persistence)
+- [Inference Export (rank 4)](#inference-export-rank-4)
 
 ---
 
@@ -445,3 +446,31 @@ make_movie(save_dir="keras/snowgan/synthetic_images/",
 ```
 
 Compiles synthetic images into an MP4 video using OpenCV, useful for visualizing training progression.
+
+---
+
+## Inference Export (rank 4)
+
+Training is rank 5, `(B, depth, H, W, C)`. Phones are not: TFLite's CONV_3D is
+a CPU-only kernel with no int8 and no GPU / NNAPI / Core ML delegate.
+`snowgan.export.to_conv2d(model)` rebuilds a **depth-1** model with Conv2D /
+Conv2DTranspose layers and the same weights. Inputs and outputs become
+`(B, H, W, C)`, and the discriminator keeps `Flatten(name="features")`.
+`export_tflite` writes it as TFLite via ExportArchive -> SavedModel. CLI:
+`python -m snowgan.export --kind ... --sidecar ... --weights ... --out x.tflite`.
+
+The export is exact only because of invariants this repo currently holds. A
+change that breaks one of them breaks the export, and
+`tests/unit/test_export_conv2d.py` will say so:
+
+- **Every conv kernel is `(1, kH, kW)` with depth stride and dilation 1.** A
+  kernel that spans depth has no rank-4 equivalent.
+- **Nothing mixes depth slices except the critic's `Flatten -> Dense` head.**
+  That head is why `depth == 2` (`modality="merged"`) is refused.
+- **Every layer type has a registered rank-4 counterpart.** An unknown layer
+  raises; the export never skips one.
+- **`Generator.model` is the whole generator only outside a fade.** A mid-fade
+  generator is refused.
+
+The rank-4 model is an inference artifact, never a training or checkpoint
+format.
