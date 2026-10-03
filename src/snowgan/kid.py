@@ -107,6 +107,110 @@ def kid_score(real_features, fake_features, subsets=10, subset_size=100, seed=0)
     }
 
 
+class RealSetError(ValueError):
+    """The real set cannot be assembled without scoring against seen data."""
+
+
+def pool_groups(config, pools):
+    """The (site, column, core) groups recorded in the config's named pools."""
+    groups = set()
+    for pool in pools:
+        for entry in (getattr(config, pool, None) or []):
+            groups.add(tuple(int(v) for v in entry))
+    return groups
+
+
+def check_sites_unseen(config, sites):
+    """Refuse sites the run's sidecar shows it trained, validated or tested on."""
+    seen = pool_groups(config, ("trained_pool", "validation_pool", "test_pool"))
+    if not seen:
+        raise RealSetError(
+            "This run's config records no split pools, so there is no record of which "
+            "sites it saw. Refusing to treat any site as unseen.")
+    overlap = sorted({g[0] for g in seen} & set(sites))
+    if overlap:
+        raise RealSetError(f"--sites {sorted(sites)} includes site(s) {overlap} that appear in this "
+                           f"run's split pools; those images are not unseen.")
+
+
+def select_rows(frame, wanted, held=None, sites=None):
+    """Manifest row indices of datatype `wanted` in the `held` groups or `sites`."""
+    from snowgan.data.dataset import normalize_datatype
+
+    rows = []
+    for index, datatype in enumerate(frame["datatype"]):
+        if normalize_datatype(datatype) != wanted:
+            continue
+        key = (int(frame["site"][index]), int(frame["column"][index]), int(frame["core"][index]))
+        if sites is not None and key[0] not in sites:
+            continue
+        if held is not None and key not in held:
+            continue
+        rows.append((index, key))
+    return rows
+
+
+def real_features(config, image_root, limit, inception, sites=None, seed=0, chunk=32):
+    """Inception features of the real set, plus the group key per image.
+
+    Shared by ``scripts/kid_check.py`` and the trainer's best-KID checkpointing,
+    so an in-training KID and an end-of-run sweep score against the same reals
+    by the same path and their numbers are directly comparable.
+
+    Images are loaded and featurised `chunk` at a time. Holding the whole set
+    at 1024^2 float32 first needed ~25 GB for sites 3-6 (995 images) against
+    a 31 GB WSL. Each image goes PIL bilinear to the run's resolution, then
+    through `inception_features`.
+
+    Default: the run's validation+test pools. With `sites`: every group from
+    those sites, after `check_sites_unseen`.
+
+    Raises:
+        RealSetError: no held-out record, a seen site, or < 2 images resolved.
+    """
+    import os
+    from PIL import Image
+    from datasets import load_dataset
+    from snowgan.data.dataset import normalize_datatype
+
+    dataset = load_dataset(getattr(config, "dataset", "rmdig/rocky_mountain_snowpack"))["train"]
+    frame = dataset.to_pandas().drop(columns=["image", "audio"], errors="ignore")
+    wanted = normalize_datatype(getattr(config, "modality", "magnified_profile"))
+
+    if sites is not None:
+        check_sites_unseen(config, sites)
+        rows = select_rows(frame, wanted, sites=sites)
+    else:
+        held = pool_groups(config, ("validation_pool", "test_pool"))
+        if not held:
+            raise RealSetError(
+                "This run's config records no validation/test pools, so there is no "
+                "held-out set to score against. Refusing to score against training data.")
+        rows = select_rows(frame, wanted, held=held)
+
+    root = os.path.expanduser(image_root)
+    rows = [(i, k) for i, k in rows if os.path.exists(os.path.join(root, str(frame["file_path"][i])))]
+    if limit and len(rows) > limit:
+        # A random subset, not the first N in manifest order (which is one site).
+        pick = np.random.default_rng(seed).choice(len(rows), size=limit, replace=False)
+        rows = [rows[i] for i in sorted(pick)]
+
+    if len(rows) < 2:
+        raise RealSetError(f"only {len(rows)} real images resolved under {root}")
+
+    height, width = int(config.resolution[0]), int(config.resolution[1])
+    features, keys = [], [key for _, key in rows]
+    for start in range(0, len(rows), chunk):
+        images = []
+        for index, _ in rows[start:start + chunk]:
+            with Image.open(os.path.join(root, str(frame["file_path"][index]))) as handle:
+                arr = np.asarray(handle.convert("RGB").resize((width, height), Image.BILINEAR),
+                                 dtype=np.float32)
+            images.append(arr / 127.5 - 1.0)
+        features.append(inception_features(np.stack(images)[:, None, ...], model=inception))
+    return np.concatenate(features, axis=0), keys
+
+
 def inception_features(images, batch_size=8, model=None):
     """InceptionV3 pool3 features (2048-d) for a batch of images in [-1, 1].
 

@@ -458,6 +458,23 @@ Full write-up and the campaign that acts on them:
     iteration outside critic training; `losses.compute_gradient_penalty` does too. Low
     expected impact, listed so it is not rediscovered.
 
+68. **No best-checkpoint selection on a metric that works.** ✅ RESOLVED 2026-10-03.
+    The only selector was `fid_interval`, whose FID is rank-63 at 64 samples and scored
+    against *training* reals. Meanwhile the campaign kept finding that the best generator
+    is not the last one: control_1024 drifted late, and Arm A's anneal behaved like soft
+    early stopping. The end-of-run sweep only sees the newest 10 snapshots plus every 10k.
+    Fix: `--kid_interval N` scores KID (`kid_samples` fakes, default 200) against the
+    held-out pools every N steps, by the same reals/estimator as `kid_check.py` (the loader
+    moved to `snowgan.kid.real_features`), and saves `best_kid/` plus `best_kid/kid.json`
+    on a new minimum. Properties pinned in `tests/integration/test_best_kid_checkpoint.py`:
+    fixed latents from a dedicated RNG (training stream untouched), the bar survives a
+    restart (read back from `kid.json`), a failed eval logs `kid_failed` and training
+    continues, and a missing `image_root` disables it rather than downloading 344 × 16 MB.
+    **Caveat — winner's curse:** the saved score is the minimum of ~80 noisy scores and is
+    biased low. Re-score `best_kid/` with `kid_check.py` at a different `--seed` before
+    reporting it. It scores the primary weights, not the EMA shadow. Its latents differ
+    from `kid_check.py`'s, so the two agree in distribution, not to the digit.
+
 ## Tier 🟠 — production readiness (do before calling this a product)
 
 8. **Replace `atexit` with explicit, atomic, signal-safe checkpointing.**

@@ -150,6 +150,11 @@ config_template = {
             # 0 disables a rule; both 0 disables pruning.
             "snapshot_keep_every": 10000,
             "snapshot_keep_recent": 10,
+            # Best-KID checkpointing (UPGRADES #68). Every kid_interval steps,
+            # score kid_samples generated images against the held-out pools
+            # and save best_kid/ on a new minimum. 0 disables. Needs image_root.
+            "kid_interval": 0,
+            "kid_samples": 200,
             # HF dataset commit SHA the run trained against, and the snowgan
             # version that wrote this sidecar. Both exist because reconstructing
             # "which manifest did this backbone see?" otherwise requires
@@ -242,6 +247,8 @@ class build:
         config_json.setdefault("critic_updates", 0)
         config_json.setdefault("snapshot_keep_every", 10000)
         config_json.setdefault("snapshot_keep_recent", 10)
+        config_json.setdefault("kid_interval", 0)
+        config_json.setdefault("kid_samples", 200)
         config_json.setdefault("dataset_revision", None)
         config_json.setdefault("snowgan_version", None)
         # Infer the modality mode from the existing depth on legacy configs.
@@ -336,7 +343,7 @@ class build:
             config_json = config_template
         return config_json
 
-    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", gen_convs_per_resolution=2, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, mask_board=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0, clamp_gp_under_sn=False, grad_probe_interval=50, max_steps=0, honor_splits=True, image_root=None, critic_updates=0, dataset_revision=None, snowgan_version=None, snapshot_keep_every=10000, snapshot_keep_recent=10, **unknown_fields):
+    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", gen_convs_per_resolution=2, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, mask_board=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0, clamp_gp_under_sn=False, grad_probe_interval=50, max_steps=0, honor_splits=True, image_root=None, critic_updates=0, dataset_revision=None, snowgan_version=None, snapshot_keep_every=10000, snapshot_keep_recent=10, kid_interval=0, kid_samples=200, **unknown_fields):
         # Forward compatibility. `configure` is called as `configure(**config_json)`,
         # so without this a config written by a NEWER snowgan raises TypeError on an
         # OLDER one — and the sidecars are a cross-repo contract: snowGradient pins
@@ -455,6 +462,8 @@ class build:
         self.dataset_revision = str(dataset_revision) if dataset_revision else None
         self.snapshot_keep_every = int(snapshot_keep_every) if snapshot_keep_every is not None else 10000
         self.snapshot_keep_recent = int(snapshot_keep_recent) if snapshot_keep_recent is not None else 10
+        self.kid_interval = int(kid_interval) if kid_interval else 0
+        self.kid_samples = int(kid_samples) if kid_samples else 200
         # Stamped with the running version, not the loaded one: this records who
         # last wrote the file, which is the question a schema mismatch asks.
         from snowgan import __version__ as _snowgan_version
@@ -535,6 +544,8 @@ class build:
             "critic_updates": self.critic_updates,
             "snapshot_keep_every": self.snapshot_keep_every,
             "snapshot_keep_recent": self.snapshot_keep_recent,
+            "kid_interval": self.kid_interval,
+            "kid_samples": self.kid_samples,
             "dataset_revision": self.dataset_revision,
             "snowgan_version": self.snowgan_version,
             "seed": self.seed,
@@ -695,6 +706,10 @@ def configure_generic(config, args):
         config.snapshot_keep_every = int(args.snapshot_keep_every)
     if getattr(args, "snapshot_keep_recent", None) is not None:
         config.snapshot_keep_recent = int(args.snapshot_keep_recent)
+    if getattr(args, "kid_interval", None) is not None:
+        config.kid_interval = int(args.kid_interval)
+    if getattr(args, "kid_samples", None) is not None:
+        config.kid_samples = int(args.kid_samples)
     if getattr(args, "image_root", None) is not None:
         config.image_root = args.image_root or None
     if getattr(args, "modality", None) is not None:
