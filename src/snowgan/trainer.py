@@ -1366,8 +1366,15 @@ class Trainer:
         }
         return delete_snapshots, delete_previews
 
-    def _cleanup_saved_batches(self, keep_every=10000, keep_recent=10, preview_keep_every=5000):
-        """Apply ``_retention_plan`` to this run's snapshot dirs and previews."""
+    def _cleanup_saved_batches(self, keep_every=10000, keep_recent=10, preview_keep_every=5000,
+                               prune_previews=False):
+        """Apply ``_retention_plan`` to this run's snapshot dirs (and optionally previews).
+
+        Previews are NOT pruned by default: they are the training-history record
+        (``make_movie`` renders them into a video) and are cheap relative to
+        weights. Snapshot dirs hold only weights + configs, so pruning them
+        never loses an image.
+        """
         snapshot_dirs = {}
         for checkpoint_path in glob(os.path.join(self.save_dir, "batch_*")):
             if os.path.isdir(checkpoint_path):
@@ -1377,7 +1384,7 @@ class Trainer:
 
         synthetic_dir = os.path.join(self.save_dir, "synthetic_images")
         previews = {}
-        if os.path.isdir(synthetic_dir):
+        if prune_previews and os.path.isdir(synthetic_dir):
             # Previews are step_N_synthetic_i.png; legacy runs used batch_N_.
             for image_path in glob(os.path.join(synthetic_dir, "*_synthetic_*.png")):
                 match = re.match(r"(?:step|batch)_(\d+)_synthetic_", os.path.basename(image_path))

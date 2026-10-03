@@ -58,3 +58,24 @@ def test_disabling_both_rules_disables_pruning_rather_than_deleting_everything()
 
 def test_empty_run_is_a_no_op():
     assert plan([], [50, 100]) == (set(), set())
+
+
+def test_trainer_does_not_prune_previews_by_default(tmp_path):
+    """Previews are the training-history record make_movie renders; keep them."""
+    import os
+    from types import SimpleNamespace
+
+    syn = tmp_path / "synthetic_images"
+    syn.mkdir()
+    for n in range(1000, 30001, 1000):
+        (tmp_path / f"batch_{n}").mkdir()
+        (syn / f"step_{n}_synthetic_1.png").write_bytes(b"")
+
+    fake = SimpleNamespace(save_dir=str(tmp_path),
+                           _extract_batch_number=Trainer._extract_batch_number,
+                           _retention_plan=Trainer._retention_plan)
+    Trainer._cleanup_saved_batches(fake, keep_every=10000, keep_recent=3)
+
+    assert len(os.listdir(syn)) == 30                       # every preview kept
+    assert not (tmp_path / "batch_5000").exists()           # snapshots still pruned
+    assert (tmp_path / "batch_30000").exists()
