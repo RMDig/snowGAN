@@ -158,3 +158,27 @@ scoring, full-res export timing) waits.
 Commits 1-4 touch the sidecar contract (2) and add a public surface (1, 3):
 snowGradient and AvAI both read sidecars via `build()` — commit 2 only changes
 what an era-1 sidecar resolves to, which is a fix for both.
+
+## 4. Results (magnified-profile v0.1.0, scored 2026-10-02 20:38 and 2026-10-03)
+
+Run at 63ee7f5 by `D:\Models\snowGAN\release_scoring\score_magnified_profile_after_a2.sh`
+after arm A2 exited; the site-shift follow-up is `scripts/release_site_shift.py`
+(written, with its reading, before it ran). Raw outputs in that directory.
+
+| | KID ± SE |
+| --- | --- |
+| Floor: real vs real, sites 3-6 (440 vs 555 images, group-disjoint) | 0.00254 ± 0.00052 |
+| Site shift: real sites 0-2 vs real sites 3-6 | 0.06945 ± 0.00181 |
+| primary vs sites 3-6 | 0.38639 ± 0.00308 — **FAIL** (gap 0.384, bound 0.0062) |
+| primary vs sites 0-2 (its training sites) | 0.38351 ± 0.00276 |
+| EMA vs sites 3-6 | 0.33812 ± 0.00191 — **FAIL** (gap 0.336, bound 0.0040) |
+| EMA vs sites 0-2 | 0.34606 ± 0.00175 |
+
+The generator is as far from its own training sites as from unseen ones, so
+the gap is the generator, not site shift. Memorisation (cross-group reference,
+200 samples): ratio 1.03 primary / 1.08 EMA, verdict HEALTHY (not copying);
+86 / 95 of 200 samples have distinct nearest neighbours. Core was not scored:
+no local core image cache.
+
+**For snowGradient:** no "lab tab" demo on the evidence. The generator makes
+varied, non-copied images that are nonetheless far from real snow images.
