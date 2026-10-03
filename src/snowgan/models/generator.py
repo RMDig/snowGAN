@@ -5,6 +5,7 @@ import keras
 from snowgan.config import build
 
 
+@keras.saving.register_keras_serializable(package="snowgan")
 class PixelNorm(keras.layers.Layer):
     """Per-pixel feature-vector normalization (ProGAN, Karras et al. 2018).
 
