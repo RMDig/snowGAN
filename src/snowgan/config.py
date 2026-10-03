@@ -164,6 +164,43 @@ config_template = {
             "sample_batch_interval": 0
 }
 
+def _resolve_pre_gen_norm_architecture(config_json):
+    """Pin the generator architecture of a sidecar older than b4e0677.
+
+    The generator's architecture fields entered the sidecar one at a time --
+    gen_norm (b4e0677, 2026-06-13), gen_upsampler (1a925d4, 06-17),
+    gen_convs_per_resolution (6ceda9e, 07-23) -- and each new field's default
+    describes the generator *after* its commit. A sidecar written before
+    b4e0677 (both v0.1.0 releases, cut at fde5671) describes a generator with
+    one Conv3DTranspose per resolution and a transpose toRGB head, but under
+    the current defaults it resolves to resize-upsampling with two convs, and
+    its weights no longer load.
+
+    Keyed on the *absence of the key*; dump() has written gen_norm ever since
+    b4e0677. One exception exists in history: 6549431, four minutes before
+    b4e0677, built resize + 1 conv without writing gen_norm. No run trained on
+    it, but a sidecar from it would resolve wrongly here. Later eras need
+    nothing: a sidecar from b4e0677..1a925d4 really is resize + 2 convs, and
+    one from 1a925d4..6ceda9e really is 2 convs. gen_norm itself is already
+    derived from batch_norm in configure().
+
+    This runs on every load, the trainer's included, so resuming (or reusing as
+    a starting config) any pre-b4e0677 save_dir now builds the v0.1 generator
+    rather than the current default. It says so on stdout, because a silent
+    architecture change is a confound (CLAUDE.md §9).
+    """
+    if "gen_norm" in config_json:
+        return
+    resolved = {}
+    for key, value in (("gen_upsampler", "transpose"), ("gen_convs_per_resolution", 1)):
+        if key not in config_json:
+            config_json[key] = resolved[key] = value
+    if resolved:
+        print(f"Legacy sidecar (written before gen_norm existed, pre-b4e0677): generator "
+              f"architecture resolved to the v0.1 stack {resolved}. Override with "
+              f"--gen_upsampler / --gen_convs_per_resolution.")
+
+
 class build:
     def __init__(self, config_filepath, autosave=False):
         """Load a config.
@@ -180,6 +217,7 @@ class build:
         if os.path.exists(config_filepath): # Try and load config if folder passed in
             print(f"Loading config file: {self.config_filepath}")
             config_json = self.load_config(self.config_filepath)
+            _resolve_pre_gen_norm_architecture(config_json)
         else:
             print("WARNING: Config not found, building from default template...")
             config_json = copy.deepcopy(config_template)
@@ -235,6 +273,18 @@ class build:
             self.enable_autosave()
 
         
+    @property
+    def datatype(self):
+        """Dead alias of ``modality``, kept in dump() for readers that expect the key.
+
+        Nothing has set it since 10cba23 (no CLI flag, no assignment) and nothing
+        reads it, so every sidecar carried the template's "magnified_profile" --
+        including the core release's. A property, not a field, so it cannot
+        drift from modality even when modality is set after configure() (as
+        configure_gen / configure_disc do from --modality).
+        """
+        return self.modality
+
     def __repr__(self):
         return '\n'.join([f"{key}: {value}" for key, value in self.__dict__.items()])
     
@@ -315,7 +365,6 @@ class build:
         #-------------------------------- Model Set-Up -------------------------------#
         self.save_dir = _normalize_save_dir(save_dir)
         self.dataset = dataset or "dennys246/rocky_mountain_snowpack"
-        self.datatype = datatype or "magnified_profile"
         self.architecture = architecture or "generator"
         self.resolution = resolution or (1024, 1024)
         self.channels = int(channels) if channels is not None else 3

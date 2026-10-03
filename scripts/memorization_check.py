@@ -29,17 +29,44 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import numpy as np  # noqa: E402
 
 
-def _load_real_corpus(config, image_root, probe_size, limit):
-    """Downscaled training images as a single array, plus their identities."""
+def _training_groups(sidecar):
+    """The (site, column, core) groups the run trained on, from its raw sidecar.
+
+    Read from the raw JSON, not a built config: build() defaults a missing
+    `honor_splits` to True, but a sidecar without the key predates the fix, and
+    those runs trained on their validation and test pools too (UPGRADES #54 --
+    both v0.1.0 releases). Leaving those pools out of the corpus, or including
+    sites added after the run, would understate memorization.
+
+    Returns None when the sidecar records no trained_pool.
+    """
+    trained = sidecar.get("trained_pool")
+    if not trained:
+        return None
+    groups = {tuple(int(v) for v in g) for g in trained}
+    if sidecar.get("honor_splits") is not True:
+        for pool in ("validation_pool", "test_pool"):
+            groups |= {tuple(int(v) for v in g) for g in (sidecar.get(pool) or [])}
+    return groups
+
+
+def _load_real_corpus(config, image_root, probe_size, limit, groups=None, seed=0):
+    """Downscaled training images, their file paths, and their (site, column, core) groups.
+
+    `groups` restricts the corpus to the groups the run trained on (see
+    `_training_groups`); None falls back to every image of the modality.
+    """
     from PIL import Image
     from datasets import load_dataset
 
@@ -52,21 +79,17 @@ def _load_real_corpus(config, image_root, probe_size, limit):
     rows = [(i, frame["file_path"][i]) for i, d in enumerate(frame["datatype"])
             if normalize_datatype(d) == wanted]
 
-    # Honour the split the run honoured: comparing against groups the model was
-    # never shown would understate memorization.
-    held_out = set()
-    for pool in ("validation_pool", "test_pool"):
-        for entry in (getattr(config, pool, None) or []):
-            held_out.add(tuple(entry))
-    if held_out and getattr(config, "honor_splits", True):
-        keys = {i: (frame["site"][i], frame["column"][i], frame["core"][i])
-                for i, _ in rows}
-        rows = [(i, fp) for i, fp in rows if keys[i] not in held_out]
+    if groups is not None:
+        rows = [(i, fp) for i, fp in rows
+                if (int(frame["site"][i]), int(frame["column"][i]), int(frame["core"][i])) in groups]
 
-    if limit:
-        rows = rows[:limit]
+    if limit and len(rows) > limit:
+        # A random subset: manifest order is site order, so the first N rows
+        # would be one or two groups and starve the cross-group reference.
+        pick = np.random.default_rng(seed).choice(len(rows), size=limit, replace=False)
+        rows = [rows[i] for i in sorted(pick)]
 
-    images, ids = [], []
+    images, ids, keys = [], [], []
     root = os.path.expanduser(image_root) if image_root else None
     for index, relative in rows:
         path = os.path.join(root, str(relative)) if root else None
@@ -78,9 +101,10 @@ def _load_real_corpus(config, image_root, probe_size, limit):
                 dtype=np.float32)
         images.append(arr / 127.5 - 1.0)
         ids.append(relative)
+        keys.append((int(frame["site"][index]), int(frame["column"][index]), int(frame["core"][index])))
     if not images:
         raise SystemExit("No local training images resolved; pass --image_root.")
-    return np.stack(images), ids
+    return np.stack(images), ids, keys
 
 
 def _nearest(query, corpus):
@@ -100,6 +124,29 @@ def _nearest(query, corpus):
     return best_d, best_i
 
 
+def _real_reference(corpus, keys, subset, exclude_same_group):
+    """Each subset image's distance to its nearest other corpus image.
+
+    With `exclude_same_group`, neighbours from the image's own (site, column,
+    core) group are skipped. Images within a group are near-duplicates, so the
+    unrestricted reference is mostly a sibling distance -- a bar so low that a
+    generator copying training images can clear it. The cross-group distance is
+    the scale of "as novel as a different snow sample", which is the question.
+    """
+    keys = np.array([hash(k) for k in keys])
+    out = []
+    for i in subset:
+        mask = np.ones(len(corpus), dtype=bool)
+        mask[i] = False
+        if exclude_same_group:
+            mask &= keys != keys[i]
+        if not mask.any():
+            raise SystemExit("cross-group reference needs at least two groups in the corpus")
+        d, _ = _nearest(corpus[i:i + 1], corpus[mask])
+        out.append(d[0])
+    return np.array(out)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -109,6 +156,8 @@ def main():
     parser.add_argument("--probe_size", type=int, default=128)
     parser.add_argument("--limit", type=int, default=0, help="cap corpus size (0 = all)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--weights_file", default="generator.weights.h5",
+                        help="Generator weights to check, e.g. generator_ema.weights.h5.")
     parser.add_argument("--gen_upsampler", default=None, choices=["resize", "transpose"])
     parser.add_argument("--gen_convs_per_resolution", type=int, default=None, choices=[1, 2])
     parser.add_argument("--gen_norm", default=None, choices=["pixel", "batch", "none"])
@@ -122,12 +171,11 @@ def main():
     from snowgan.checkpoint import resolve_weights_path
 
     # Read the config from a copy: loading a save_dir must not rewrite it.
-    scratch = "/tmp/_memcheck_cfg"
-    shutil.rmtree(scratch, ignore_errors=True)
-    os.makedirs(scratch, exist_ok=True)
+    scratch = tempfile.mkdtemp(prefix="memcheck_cfg_")
     shutil.copy(os.path.join(args.save_dir, "generator_config.json"),
                 os.path.join(scratch, "generator_config.json"))
     config = build(os.path.join(scratch, "generator_config.json"))
+    shutil.rmtree(scratch, ignore_errors=True)
     for key, value in (("gen_upsampler", args.gen_upsampler),
                        ("gen_convs_per_resolution", args.gen_convs_per_resolution),
                        ("gen_norm", args.gen_norm)):
@@ -137,14 +185,21 @@ def main():
     tf.keras.utils.set_random_seed(args.seed)
     generator = Generator(config)
     generator.model.build((None, config.latent_dim))
-    weights = resolve_weights_path(os.path.join(args.save_dir, "generator.weights.h5"))
+    weights = resolve_weights_path(os.path.join(args.save_dir, args.weights_file))
     generator.model.load_weights(weights)
     print(f"Loaded {weights}")
 
+    with open(os.path.join(args.save_dir, "generator_config.json")) as handle:
+        sidecar = json.load(handle)
+    groups = _training_groups(sidecar)
+    if groups is None:
+        print("WARNING: sidecar records no trained_pool; comparing against every image of the modality.")
     print(f"Loading training corpus at {args.probe_size}px...")
-    corpus, ids = _load_real_corpus(config, args.image_root, args.probe_size, args.limit)
-    print(f"  {len(corpus)} training images (splits honoured: "
-          f"{getattr(config, 'honor_splits', True)})")
+    corpus, ids, keys = _load_real_corpus(config, args.image_root, args.probe_size, args.limit, groups,
+                                          seed=args.seed)
+    print(f"  {len(corpus)} training images from "
+          f"{'all groups' if groups is None else f'{len(groups)} trained groups'} "
+          f"(splits honoured: {sidecar.get('honor_splits') is True})")
 
     samples = []
     for i in range(args.n):
@@ -160,21 +215,22 @@ def main():
 
     gen_d, gen_i = _nearest(samples, corpus)
 
-    # Real-to-real baseline: each training image's nearest OTHER training image.
-    # This is the reference the generated distance only means something against.
+    # Real-to-real references: the generated distance only means something
+    # against one. The verdict uses the CROSS-GROUP reference (decided
+    # 2026-10-02, before any release was scored); the any-neighbour one is
+    # printed for comparability with earlier campaign checks.
     rng = np.random.default_rng(args.seed)
     subset = rng.choice(len(corpus), size=min(200, len(corpus)), replace=False)
-    real_d = []
-    for i in subset:
-        others = np.delete(np.arange(len(corpus)), i)
-        d, _ = _nearest(corpus[i:i + 1], corpus[others])
-        real_d.append(d[0])
-    real_d = np.array(real_d)
+    sibling_d = _real_reference(corpus, keys, subset, exclude_same_group=False)
+    real_d = _real_reference(corpus, keys, subset, exclude_same_group=True)
 
     print(f"\n  generated -> nearest training image")
     print(f"    mean {gen_d.mean():.4f}   min {gen_d.min():.4f}   max {gen_d.max():.4f}")
-    print(f"  training  -> nearest OTHER training image  (the reference)")
+    print(f"  training  -> nearest training image of ANOTHER group  (the reference)")
     print(f"    mean {real_d.mean():.4f}   min {real_d.min():.4f}   p5 {np.percentile(real_d,5):.4f}")
+    print(f"  training  -> nearest OTHER training image, any group  (legacy reference)")
+    print(f"    mean {sibling_d.mean():.4f}   min {sibling_d.min():.4f}   "
+          f"p5 {np.percentile(sibling_d,5):.4f}   ratio gen/legacy = {gen_d.mean() / sibling_d.mean():.3f}")
 
     ratio = gen_d.mean() / real_d.mean()
     print(f"\n  ratio gen/real = {ratio:.3f}")
