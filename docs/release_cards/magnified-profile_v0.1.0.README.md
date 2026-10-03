@@ -149,15 +149,36 @@ in the table below arrived after learning had largely stopped.
 
 - **No valid FID.** The in-training FID used 64-256 samples against
   2048-dimensional Inception features, a rank-deficient and sample-size-biased
-  estimate. The `fid_interval` setting above produced no usable number. No KID
-  or memorisation check has been run on this release yet.
+  estimate. The `fid_interval` setting above produced no usable number.
+- **KID: the generator is far from real images (measured 2026-10-02/03).**
+  Unbiased polynomial KID on Inception features, 200 generated samples, 10
+  subsets of 100. The pass criterion was fixed before scoring: KID within
+  2 standard errors of a real-vs-real floor.
+
+  | | KID ± SE |
+  | --- | --- |
+  | Floor: real vs real, sites 3-6 (two group-disjoint halves, 995 images, 32 groups) | 0.0025 ± 0.0005 |
+  | Site shift alone: real sites 0-2 vs real sites 3-6 | 0.069 ± 0.002 |
+  | `generator.weights.h5` vs sites 3-6 (never seen) | 0.386 ± 0.003 |
+  | `generator.weights.h5` vs sites 0-2 (its training sites) | 0.384 ± 0.003 |
+  | `generator_ema.weights.h5` vs sites 3-6 | 0.338 ± 0.002 |
+  | `generator_ema.weights.h5` vs sites 0-2 | 0.346 ± 0.002 |
+
+  Both fail: the gap is 62x (primary) and 85x (EMA) the bound. The generator is as far
+  from the images it trained on as from unseen sites, so the gap is the
+  generator, not the change of site.
+- **No memorisation.** For 200 samples per weights file, the mean distance to
+  the nearest training image (128 px, mean absolute difference) is 1.03x
+  (primary) and 1.08x (EMA) the distance from a training image to the nearest
+  image of a different group. Samples are not copies. Only 86 / 95 of 200
+  samples have distinct nearest neighbours, consistent with limited variety.
 - **The logged critic loss never exceeded the 1-Lipschitz ceiling.** Max
   |logged loss| was 783 over 427,220 steps, against 2*sqrt(1024*1024*3) ≈ 3,547.
   That is necessary for a 1-Lipschitz critic, not proof of one.
 - **The generator is not collapsed.** snowGAN's own check (2026-09-23, raw
   weights, 6 samples) measured latent diversity 0.490, against ≤ 0.00003 for
-  collapsed runs. That is the only positive evidence for this release, and it
-  is generative, not discriminative.
+  collapsed runs. It produces varied images that do not copy its training
+  set, but by KID they are not close to real snow images.
 - **Downstream measurement (snowGradient, 2026-10).** In a pre-registered
   modality-recognition probe (core vs profile vs magnified profile,
   leave-one-site-out over sites 3-6, at 256x256 with global average pooling),
