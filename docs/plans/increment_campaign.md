@@ -81,6 +81,15 @@ generated samples each, 10 subsets of 100. Reported as mean ± SE over checkpoin
 On the same seed-42/seed-43 pair, KID gives 0.400 ± 0.033 vs 0.402 ± 0.021 — **|t| = 0.05**,
 correctly indistinguishable.
 
+**Correction (2026-10-03): the seed is not "only" the init.** `DataManager.derive_splits`
+seeds its `random.Random` from `config.seed`, so seed 43 draws different validation/test
+groups — it trains on different data and is scored against a different held-out set
+(609 images / 9 groups, vs seed 42's 344). `noise_seed43` therefore measured init + split
++ eval-set variance together; the null still holds, and is if anything a *wider* floor.
+Consequence for design: **compare only within a seed.** The A1 replicate is read as the
+paired difference `A1_s43 − noise_seed43` (same split, same reals) against
+`A1_s42 − control_1024`, never as `A1_s43` vs `A1_s42` in absolute KID.
+
 | metric | role |
 |---|---|
 | **`KID_mean`** | **PRIMARY.** Mean over the 10 checkpoints. Lower is better |
@@ -251,11 +260,15 @@ Together they give checkpoint selection the baseline needed and did not have:
 On the baseline that rule selects **step 50,000** — which is the checkpoint that actually
 best matches the data, and which a naive "take the last checkpoint" would have missed.
 
-**Proposed, pending campaign results:** implement as `--early_stop_patience` (stop when
-`dist_err` has not improved for N evaluations) plus a `best_dist_err/` checkpoint
-mirroring the existing `best_fid/` path. Not built yet — the thresholds should be
-calibrated on three more runs before being wired into the trainer, or we would be
-encoding a rule derived from a single run.
+**Superseded 2026-10-03.** `dist_err` was demoted to descriptive-only after the seed-43
+noise probe showed it fires on identical recipes (|t| = 2.64) where KID does not
+(|t| = 0.05). Checkpoint selection is now **best-KID** (UPGRADES #68): `--kid_interval
+1000` scores the live generator against the held-out pools and keeps `best_kid/`. It
+records every score to `metrics.jsonl` (`event: "kid"`) alongside ‖∇D‖, so the ‖∇D‖
+validity filter above can be applied post hoc without baking a threshold into the
+trainer. **No early stop**: the run still goes to `max_steps`, because one run's
+patience value would be a rule derived from a single run. The saved best is biased low
+(winner's curse) — re-score it with `kid_check.py --seed 1` before quoting it.
 
 ---
 

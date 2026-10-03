@@ -115,7 +115,7 @@ exec scripts/train_with_restarts.sh \
   --no-augment \
   --ada_target 0 --grad_clip_norm 0 --ema_decay 0 \
   --lr_decay none --fid_interval 0 \
-  --grad_probe_interval 50 \
+  --grad_probe_interval 50   --kid_interval "${KID_INTERVAL:-1000}" --kid_samples 200 \
   --cleanup_milestone 1000 --sample_batch_interval 50 \
   --epochs 1000 \
   "$@"
@@ -141,5 +141,9 @@ exec scripts/train_with_restarts.sh \
 #                        stability measure, not a step-size bound.
 #   --ema_decay 0        The EMA shadow is ~13% random init at step 2,000, so
 #                        early gates read on it fail healthy runs.
+#   --kid_interval 1000  Observation only: scores the live generator against the
+#                        held-out pools and keeps best_kid/. Fixed latents from
+#                        a dedicated RNG, so the training stream is unchanged.
+#                        KID_INTERVAL=0 turns it off.
 #   --lr_decay none      The structure era had no schedule. Testing a real
 #                        anneal is increment 4, not part of the control.

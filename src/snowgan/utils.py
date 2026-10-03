@@ -191,6 +191,8 @@ def parse_args():
                              'omit to keep whatever the saved config has). Off by default on a fresh run.')
     parser.add_argument('--snapshot_keep_every', type=int, default=None, help='Keep every Nth batch_* snapshot permanently, for long-run trajectories (default 10000; 0 disables this rule).')
     parser.add_argument('--snapshot_keep_recent', type=int, default=None, help='Also keep the newest N snapshots, i.e. the rolling 1k-spaced window that kid_check.py scores at end of run (default 10; 0 disables). Raise it if you need mid-run KID windows.')
+    parser.add_argument('--kid_interval', type=int, default=None, help='Steps between in-training KID evaluations against the held-out pools; a new minimum is saved to best_kid/ (default 0 = off). Requires --image_root. Same reals and estimator as scripts/kid_check.py.')
+    parser.add_argument('--kid_samples', type=int, default=None, help='Generated images per in-training KID evaluation (default 200, matching kid_check.py --n_gen).')
     parser.add_argument('--image_root', type=str, default=None, help='Local directory mirroring the dataset, keyed by the manifest file_path column (e.g. ~/rmdig-cache-512). The HF image column is URL-backed and costs ~2 s of HTTP per image per epoch, which makes the data pipeline ~97%% of a 1024px train step; a local root cuts that to ~0.007 s. Rows missing locally fall back to the remote column.')
     parser.add_argument('--honor_splits', action=argparse.BooleanOptionalAction, default=None, help='Exclude validation_pool / test_pool groups from the training stream. Default ON. Runs before 2026-09 trained on their own test_pool, which invalidates any downstream transfer probe; --no-honor_splits reproduces that old behavior.')
 

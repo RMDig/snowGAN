@@ -311,6 +311,17 @@ class Trainer:
         self.fid_interval = getattr(self.gen.config, 'fid_interval', 0)
         self.best_fid = float('inf')
 
+        # Best-KID checkpointing (UPGRADES #68). The campaign showed the best
+        # generator is often not the last one (control_1024 drifted late; Arm A's
+        # anneal acted as soft early stopping), and the end-of-run sweep only
+        # sees the newest 10 snapshots plus every 10k. This scores the live
+        # generator against the held-out pools on a cadence and keeps the best.
+        self.kid_interval = int(getattr(self.gen.config, 'kid_interval', 0) or 0)
+        self.kid_samples = int(getattr(self.gen.config, 'kid_samples', 200) or 200)
+        self._kid_inception = None
+        self._kid_real_features = None
+        self.best_kid = self._load_best_kid()
+
         # Gradient clipping
         self.grad_clip_norm = getattr(self.gen.config, 'grad_clip_norm', 0.0)
 
@@ -625,6 +636,122 @@ class Trainer:
             print(f"Warning: FID computation failed: {e}")
             return None
 
+    _KID_RECORD = "kid.json"
+    # Fixed scoring parameters, matching scripts/kid_check.py defaults so an
+    # in-training number and an end-of-run sweep read on the same scale.
+    _KID_SUBSETS = 10
+    _KID_SUBSET_SIZE = 100
+
+    def _best_kid_dir(self):
+        return os.path.join(self.save_dir, "best_kid")
+
+    def _load_best_kid(self):
+        """The best KID recorded by an earlier launch of this run, else +inf.
+
+        Persisted next to the weights it describes, so a restart (the RSS
+        wrapper restarts long runs several times) cannot overwrite a better
+        best_kid/ with the first, worse checkpoint it scores after relaunch.
+        """
+        import json
+        path = os.path.join(self._best_kid_dir(), self._KID_RECORD)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return float(json.load(handle)["kid_mean"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return float("inf")
+
+    def _maybe_evaluate_kid(self):
+        if self.kid_interval > 0 and self.global_step > 0 and self.global_step % self.kid_interval == 0:
+            self._evaluate_kid()
+
+    def _disable_kid(self, reason):
+        print(f"Warning: best-KID checkpointing disabled: {reason}", flush=True)
+        self.metrics.write_event("kid_disabled", global_step=int(self.global_step), reason=str(reason))
+        self.kid_interval = 0
+
+    def _kid_fake_features(self):
+        """Inception features of `kid_samples` images from the live generator.
+
+        Latents come from a fresh Generator seeded off the run seed on every
+        call: the same z at every evaluation, so successive scores differ only
+        by the weights (lower variance for ranking checkpoints), and the global
+        TF RNG -- the training stream -- is never touched.
+        """
+        from snowgan.kid import inception_features
+
+        seed = int(getattr(self.gen.config, "seed", 42)) + 2
+        z = tf.random.Generator.from_seed(seed).normal([self.kid_samples, self.gen.config.latent_dim])
+        features = []
+        # Chunked and featurised per chunk: 200 images at 1024^2 float32 are
+        # 2.5 GB if held at once, on top of a resident training graph.
+        for start in range(0, self.kid_samples, 4):
+            images = self.gen.model(z[start:start + 4], training=False)
+            features.append(inception_features(images, model=self._kid_inception))
+            del images
+        return np.concatenate(features, axis=0)
+
+    def _evaluate_kid(self):
+        """Score the live generator; save best_kid/ on a new minimum.
+
+        Scores the primary weights (what generator.weights.h5 holds and what
+        kid_check.py scores by default), not the EMA shadow.
+
+        The saved best is optimistically biased (winner's curse: the minimum
+        of many noisy scores). Report it only after re-scoring best_kid/ with
+        kid_check.py at a different --seed.
+        """
+        import json
+        from snowgan.kid import RealSetError, kid_score, real_features
+
+        try:
+            if self._kid_real_features is None:
+                image_root = getattr(self.gen.config, "image_root", None)
+                if not image_root:
+                    self._disable_kid("needs --image_root (reals are read from the local mirror)")
+                    return None
+                from tensorflow.keras.applications.inception_v3 import InceptionV3
+                self._kid_inception = InceptionV3(include_top=False, pooling="avg",
+                                                  input_shape=(299, 299, 3))
+                self._kid_real_features, keys = real_features(
+                    self.gen.config, image_root, 0, self._kid_inception)
+                self.metrics.write_event("kid_reals", global_step=int(self.global_step),
+                                         images=len(keys), groups=len(set(keys)))
+
+            score = kid_score(self._kid_real_features, self._kid_fake_features(),
+                              subsets=self._KID_SUBSETS, subset_size=self._KID_SUBSET_SIZE, seed=0)
+        except RealSetError as exc:
+            self._disable_kid(exc)
+            return None
+        except Exception as exc:  # an eval must never take down a multi-day run
+            print(f"Warning: KID evaluation failed at step {self.global_step}: {exc}", flush=True)
+            self.metrics.write_event("kid_failed", global_step=int(self.global_step), error=str(exc)[:500])
+            return None
+
+        improved = score["kid_mean"] < self.best_kid
+        print(f"KID @ step {self.global_step}: {score['kid_mean']:.5f} +/- {score['kid_se']:.5f} "
+              f"(best: {min(self.best_kid, score['kid_mean']):.5f}{', new' if improved else ''})", flush=True)
+        self.metrics.write_event("kid", global_step=int(self.global_step),
+                                 critic_updates=int(getattr(self, "critic_updates", 0)),
+                                 n_gen=int(self.kid_samples), n_real=int(len(self._kid_real_features)),
+                                 best=bool(improved), **score)
+        if improved:
+            self.best_kid = score["kid_mean"]
+            best_dir = self._best_kid_dir()
+            self.save_model(best_dir + "/")
+            # Record written after the weights: a crash between the two leaves
+            # an older record next to newer weights, which only makes the next
+            # launch's bar easier to beat -- never a better model overwritten.
+            record = dict(score, global_step=int(self.global_step),
+                          critic_updates=int(getattr(self, "critic_updates", 0)),
+                          n_gen=int(self.kid_samples), n_real=int(len(self._kid_real_features)),
+                          note="Selected as the minimum of many noisy scores; re-score with "
+                               "scripts/kid_check.py at a different --seed before reporting.")
+            tmp = os.path.join(best_dir, self._KID_RECORD + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(record, handle, indent=2)
+            os.replace(tmp, os.path.join(best_dir, self._KID_RECORD))
+        return score
+
     def train(self, batch_size = 8, epochs = 1):
         """
         Initializes training the discriminator and generator based on requested
@@ -755,6 +882,7 @@ class Trainer:
                 if self.max_steps and self.global_step >= self.max_steps:
                     print(f"Reached --max_steps {self.max_steps} at global_step "
                           f"{self.global_step}; saving and stopping.", flush=True)
+                    self._maybe_evaluate_kid()  # the final step is a candidate too
                     self.save_model()
                     self.metrics.write_event("max_steps_reached",
                                              global_step=int(self.global_step), batch=int(batch))
@@ -788,6 +916,8 @@ class Trainer:
                             best_dir = os.path.join(self.save_dir, "best_fid/")
                             self.save_model(best_dir)
                             print(f"New best FID! Model saved to {best_dir}")
+
+                self._maybe_evaluate_kid()
 
                 # Save the model state on the step interval. Write the rolling
                 # top-level checkpoint (the live state __init__ resumes from)
