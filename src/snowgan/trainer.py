@@ -807,15 +807,20 @@ class Trainer:
                         print(f"LR @ step {self.global_step}: gen={gen_lr:.2e} disc={disc_lr:.2e}")
                     self.save_model()  # rolling top-level live checkpoint
                     self.save_model(f"{self.save_dir}/batch_{batch}/")
-                    if self.cleanup_milestone > 0 and batch % self.cleanup_milestone == 0:
-                        self._cleanup_saved_batches(100)
+                    if self.cleanup_milestone > 0:
+                        self._cleanup_saved_batches(
+                            keep_every=int(getattr(self.gen.config, "snapshot_keep_every", 10000) or 0),
+                            keep_recent=int(getattr(self.gen.config, "snapshot_keep_recent", 10) or 0),
+                        )
 
                 # Per-batch seeded preview emission. Off by default
                 # (sample_batch_interval=0); when enabled it mirrors the
                 # epoch-end block below so a run that never closes an
                 # epoch still leaves a visible trail in synthetic_images/.
-                # Filename prefix matches the historical naming so
-                # _cleanup_saved_batches' glob still trims them.
+                # Named by global_step, not batch (UPGRADES #67): the batch
+                # counter is recovered by globbing snapshot dirs and rewinds on
+                # restart, so batch-named previews replayed and overwrote earlier
+                # images with ones from a later training state.
                 batch_sample_interval = int(getattr(self.gen.config, "sample_batch_interval", 0) or 0)
                 if self._should_emit_batch_sample(batch, batch_sample_interval, self.n_samples):
                     backup = self._apply_ema_to_generator()
@@ -825,7 +830,7 @@ class Trainer:
                             count=self.n_samples,
                             seed_size=self.gen.config.latent_dim,
                             save_dir=f"{self.save_dir}/synthetic_images/",
-                            filename_prefix=f"batch_{batch}_synthetic",
+                            filename_prefix=f"step_{self.global_step}_synthetic",
                             seed=self._tracking_seed,
                         )
                     finally:
@@ -1236,8 +1241,13 @@ class Trainer:
             self.plot_history()
         except Exception as e:
             print(f"Warning: failed to save/plot history: {e}")
-        # Save fade endpoints weights so mid-fade resume preserves toRGB_prev
-        if getattr(self.gen, 'fade_endpoints', None) is not None:
+        # Save fade endpoints weights so mid-fade resume preserves toRGB_prev.
+        # Only when fade is ON: the fade-endpoints model shares every base
+        # generator layer, so this file is a second full copy of the generator
+        # (167 MB at 1024px, 46% of a snapshot). It was written unconditionally,
+        # including on every run that has never enabled fade (UPGRADES #66).
+        if (getattr(self.gen.config, 'fade', False)
+                and getattr(self.gen, 'fade_endpoints', None) is not None):
             self._atomic_save_weights(self.gen.fade_endpoints, f"{path}/generator_fade_endpoints.weights.h5")
         # Save multi-scale discriminator weights
         if self.disc_lowres is not None:
@@ -1314,51 +1324,85 @@ class Trainer:
         except ValueError:
             return None
 
-    def _cleanup_saved_batches(self, keep_every: int):
-        """
-        Remove checkpoint directories for batches that do not align with the cleanup milestone
-        and trim only the seven most recent synthetic samples for those batches.
-        """
-        if keep_every <= 0:
-            return
+    @staticmethod
+    def _retention_plan(snapshot_numbers, preview_numbers, keep_every=10000,
+                        keep_recent=10, preview_keep_every=5000):
+        """Decide what to delete. Pure, so the policy is testable without disk.
 
-        removed_checkpoints = 0
-        trimmed_images = 0
-        synthetic_dir = os.path.join(self.save_dir, "synthetic_images")
+        Keeps exactly what the campaign's analysis reads:
+          - every ``keep_every``-th snapshot, for long-run trajectories;
+          - the ``keep_recent`` newest snapshots, i.e. a rolling 1k-spaced
+            window — what ``kid_check.py --sweep`` scores at the end of a run;
+          - previews at every ``preview_keep_every`` step, plus every preview
+            inside the recent window, for §9's "open the samples and look".
 
+        This replaces a policy that was a no-op: it was called with
+        ``keep_every=100`` while snapshots only existed at multiples of 1000,
+        so nothing was ever removed (~70 GB per 100k-step run). Its preview
+        trim was also inverted — it deleted the 7 NEWEST images of a pruned
+        snapshot rather than keeping them.
+
+        A ``keep_every`` or ``keep_recent`` of 0 disables that rule; both 0
+        disables pruning entirely rather than deleting everything.
+
+        Returns:
+            tuple[set[int], set[int]]: (snapshot numbers to delete,
+            preview step numbers to delete).
+        """
+        snapshots = sorted(set(snapshot_numbers))
+        if not snapshots or (keep_every <= 0 and keep_recent <= 0):
+            return set(), set()
+
+        recent = set(snapshots[-keep_recent:]) if keep_recent > 0 else set()
+        keep = {n for n in snapshots if keep_every > 0 and n % keep_every == 0} | recent
+        delete_snapshots = set(snapshots) - keep
+
+        # Previews: everything at or after the oldest snapshot in the recent
+        # window is kept; older ones only on the coarse cadence.
+        window_start = min(recent) if recent else max(snapshots) + 1
+        delete_previews = {
+            n for n in set(preview_numbers)
+            if n < window_start and not (preview_keep_every > 0 and n % preview_keep_every == 0)
+        }
+        return delete_snapshots, delete_previews
+
+    def _cleanup_saved_batches(self, keep_every=10000, keep_recent=10, preview_keep_every=5000):
+        """Apply ``_retention_plan`` to this run's snapshot dirs and previews."""
+        snapshot_dirs = {}
         for checkpoint_path in glob(os.path.join(self.save_dir, "batch_*")):
-            if not os.path.isdir(checkpoint_path):
-                continue
-            batch_number = self._extract_batch_number(checkpoint_path)
-            if batch_number is None or batch_number % keep_every == 0:
-                continue
+            if os.path.isdir(checkpoint_path):
+                number = self._extract_batch_number(checkpoint_path)
+                if number is not None:
+                    snapshot_dirs[number] = checkpoint_path
 
-            shutil.rmtree(checkpoint_path, ignore_errors=True)
-            removed_checkpoints += 1
+        synthetic_dir = os.path.join(self.save_dir, "synthetic_images")
+        previews = {}
+        if os.path.isdir(synthetic_dir):
+            # Previews are step_N_synthetic_i.png; legacy runs used batch_N_.
+            for image_path in glob(os.path.join(synthetic_dir, "*_synthetic_*.png")):
+                match = re.match(r"(?:step|batch)_(\d+)_synthetic_", os.path.basename(image_path))
+                if match:
+                    previews.setdefault(int(match.group(1)), []).append(image_path)
 
-            if os.path.isdir(synthetic_dir):
-                pattern = os.path.join(synthetic_dir, f"batch_{batch_number}_synthetic_*.png")
-                indexed_images = []
-                for image_path in glob(pattern):
-                    stem = os.path.splitext(os.path.basename(image_path))[0]
-                    try:
-                        image_index = int(stem.split("_")[-1])
-                    except (ValueError, IndexError):
-                        continue
-                    indexed_images.append((image_index, image_path))
-                indexed_images.sort(key=lambda item: item[0])
-                for _, image_path in indexed_images[-7:]:
-                    try:
-                        os.remove(image_path)
-                        trimmed_images += 1
-                    except (FileNotFoundError, ValueError):
-                        continue
+        delete_snapshots, delete_previews = self._retention_plan(
+            snapshot_dirs.keys(), previews.keys(), keep_every=keep_every,
+            keep_recent=keep_recent, preview_keep_every=preview_keep_every)
 
-        if removed_checkpoints or trimmed_images:
-            print(
-                f"Cleanup milestone reached (keep every {keep_every} batches): "
-                f"removed {removed_checkpoints} checkpoint directories, trimmed {trimmed_images} synthetic images."
-            )
+        for number in delete_snapshots:
+            shutil.rmtree(snapshot_dirs[number], ignore_errors=True)
+        removed_images = 0
+        for number in delete_previews:
+            for image_path in previews[number]:
+                try:
+                    os.remove(image_path)
+                    removed_images += 1
+                except FileNotFoundError:
+                    continue
+
+        if delete_snapshots or removed_images:
+            print(f"Retention: removed {len(delete_snapshots)} snapshot dir(s) and "
+                  f"{removed_images} preview image(s) (keep every {keep_every}, "
+                  f"newest {keep_recent}, previews every {preview_keep_every}).")
 
     def _save_configs(self, path: str):
         """
