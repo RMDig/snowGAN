@@ -113,6 +113,41 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
 | **1z-B** | 09-23 | 1z-A | **only change: `--spectral_norm --disc_lambda_gp 1.0`** (the collapsed runs' recipe) | same | nn_dist **0.570 → 0.292**; diversity **0.372**; ‖dD/dx‖ settles **0.35–0.42** (over-smoothed) with λ·GP stuck at 0.33–0.47 | ✅ fits — hypothesis **not** confirmed at this scale; mechanism corrected (see above) |
 | **0** | 09-23 | HEAD + Phase 0 | **control: does current code train the structure-era recipe from scratch?** disc 2 : gen 3, λ_gp 10, **no SN**, no clip, no decay, no EMA, no ADA, no multiscale, seed 42 | magnified_profile **512**, 10,000 steps = 20,000 critic updates, 133 min on RTX 5080 | **‖dD/dx‖ 1.046 (real) / 1.030 (interp) / 1.081 (fake)**; \|W\| 1.0 vs 1774 ceiling; λ·GP 25.4% of loss; **latent diversity 0.609** (released model 0.490, dead runs 0.00003); std 0.583; saturated 3.35%; samples show the crystal-mesh motif, two latents visibly different | **✅ PASSES** |
 
+**Arm A2 — `lr_min 1e-5` (2026-10-03): the higher floor loses A1's benefit.**
+Identical to A1 except a 10x higher LR floor, to test whether A1 froze too early.
+KID over 70–79k vs the same windows:
+
+| run | KID mean | SE | ρ (trend) | last | weight movement /1k |
+|---|---|---|---|---|---|
+| baseline (flat LR) | 0.2987 | 0.0240 | +0.15 | 0.371 | 0.167 |
+| A1 (`lr_min 1e-6`) | **0.2270** | 0.0162 | **−0.95** | **0.166** | 0.0096 |
+| A2 (`lr_min 1e-5`) | 0.2722 | 0.0100 | **+0.83** | 0.296 | 0.0318 |
+
+A2 vs baseline: +0.027, 2×SE 0.052 → **tie**. A2 vs A1: +0.045, 2×SE 0.038 → **A2
+distinguishably worse** (narrowly). A2's KID *rises* across the window (ρ = +0.83) while
+the model keeps moving at 3.3× A1's rate.
+
+**Reading.** Keeping the model in motion did not let it keep improving — at `lr 1e-5` it
+drifted *worse* late in training. Only near-zero LR stopped the degradation. So A1's win
+looks less like "the anneal finds a better optimum" and more like **"the anneal acts as
+soft early stopping"**: it freezes the model before late-training drift degrades it. That
+is the outcome flagged in advance as the one that would undercut the preferred
+interpretation, and it is recorded as such.
+
+It also points at *what* drives the late degradation: something keeps pushing the model
+away from good solutions whenever it is allowed to move. The critic's Lipschitz escape is
+the prime suspect, which is what Arm B tests.
+
+**A2 as an accidental replicate.** Through the first half A1 and A2's schedules differ by
+≤13%, yet their ‖∇D‖ differs by up to 48% (40–50k: 1.151 vs 1.705). The "A1 holds ‖∇D‖
+~0.28 below baseline" claim logged for Arm A is **retracted** — it sits inside that
+run-to-run spread and never had error bars. Rule going forward: no number supports a claim
+without an error estimate.
+
+**Baseline late window (90–99k):** 0.2825 ± 0.0126, ρ = −0.01. The baseline decelerates
+but never converges. A1 at 80k still beats the baseline's *final* window (diff 0.0555 vs
+2×SE 0.041).
+
 **Arm A — LR anneal (2026-10-01): promising, untuned, and confounded by freezing.**
 80,000 steps at 1024px, identical to `control_1024` except `--lr_decay cosine
 --lr_decay_steps 80000 --lr_min 1e-6 --fade_steps 1`. Judged on KID against the 344
