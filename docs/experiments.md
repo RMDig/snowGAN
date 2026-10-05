@@ -113,6 +113,45 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
 | **1z-B** | 09-23 | 1z-A | **only change: `--spectral_norm --disc_lambda_gp 1.0`** (the collapsed runs' recipe) | same | nn_dist **0.570 → 0.292**; diversity **0.372**; ‖dD/dx‖ settles **0.35–0.42** (over-smoothed) with λ·GP stuck at 0.33–0.47 | ✅ fits — hypothesis **not** confirmed at this scale; mechanism corrected (see above) |
 | **0** | 09-23 | HEAD + Phase 0 | **control: does current code train the structure-era recipe from scratch?** disc 2 : gen 3, λ_gp 10, **no SN**, no clip, no decay, no EMA, no ADA, no multiscale, seed 42 | magnified_profile **512**, 10,000 steps = 20,000 critic updates, 133 min on RTX 5080 | **‖dD/dx‖ 1.046 (real) / 1.030 (interp) / 1.081 (fake)**; \|W\| 1.0 vs 1774 ceiling; λ·GP 25.4% of loss; **latent diversity 0.609** (released model 0.490, dead runs 0.00003); std 0.583; saturated 3.35%; samples show the crystal-mesh motif, two latents visibly different | **✅ PASSES** |
 
+**A1 replicate at seed 43 (2026-10-05): A1's trend signature did NOT replicate.**
+`arm_a1_s43`: A1's exact recipe (`--lr_decay cosine --lr_decay_steps 80000 --lr_min 1e-6
+--fade_steps 1`), `SEED=43`, 80k steps, 27 h, one RSS restart. First run with best-KID
+checkpointing (`--kid_interval 1000`). Commit 73700f8.
+
+Seed 43 also changes the split (see increment_campaign §2 correction): 609 held-out images
+from 9 groups. **Absolute KID is not comparable to the seed-42 rows below.** The intended
+paired comparison (vs `noise_seed43`) is not possible either: `noise_seed43` stopped at
+39k, so there is no seed-43 baseline window at 70–79k.
+
+What *is* comparable is the within-run signature A1 was credited with:
+
+| | window KID mean ± SE | Spearman ρ | last (79k) | weight movement /1k | ‖∇D‖ 70–80k |
+|---|---|---|---|---|---|
+| A1, seed 42 | 0.2270 ± 0.0162 | **−0.95** | 0.166 (its best) | 0.0096 | 1.319 |
+| **A1, seed 43** | 0.3108 ± 0.0217 | **+0.72** | 0.385 (9th of 10) | 0.0115 | 1.555 |
+
+Per-checkpoint (kid_check, seed 0): 0.215, 0.266, 0.326, 0.239, 0.282, 0.445, 0.333,
+0.285, 0.332, 0.385. The in-training scores (different latents) track these at r = 0.76.
+
+**Reading.**
+- The monotone decline that was A1's strongest evidence (ρ −0.95, ending at its best) did
+  not recur. At seed 43, KID *rises* across the window at the same near-zero LR.
+- Weight movement was as frozen as A1-s42 (0.0115 vs 0.0096 per 1k, 15× below baseline),
+  yet KID still swung 0.21 → 0.44 between adjacent checkpoints. **Freezing the weights
+  did not stabilize the output distribution.** That undercuts the "soft early stopping"
+  reading of A1: a frozen model was supposed to be a stable one.
+- Window std 0.069, vs A1-s42 0.051 and baseline 0.076. The checkpoint-to-checkpoint KID
+  spread barely depends on the LR, so the A1-s42 ρ = −0.95 is plausibly one draw from a
+  wide distribution. A1's effect is **unreplicated**; treat Arm A as unresolved.
+- ‖∇D‖ rose to 1.555 under a near-zero LR, as A1-s42's did (1.103 → 1.319). This is the
+  one feature both seeds share: the critic escapes even when the step size cannot explain
+  it, which still points at Arm B.
+
+**Best-KID checkpointing earned its keep.** Best was step 56,000 at 0.243 in training.
+Re-scored with `kid_check.py --seed 1` it reads **0.234 ± 0.002**, so the winner's-curse
+bias was small here. The final 80k checkpoint re-scores at 0.352. Selecting by KID beat
+"take the last checkpoint" by 0.12, and beat the whole 70–79k window mean by 0.08.
+
 **Arm A2 — `lr_min 1e-5` (2026-10-03): the higher floor loses A1's benefit.**
 Identical to A1 except a 10x higher LR floor, to test whether A1 froze too early.
 KID over 70–79k vs the same windows:
