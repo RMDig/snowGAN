@@ -318,6 +318,7 @@ class Trainer:
         # generator against the held-out pools on a cadence and keeps the best.
         self.kid_interval = int(getattr(self.gen.config, 'kid_interval', 0) or 0)
         self.kid_samples = int(getattr(self.gen.config, 'kid_samples', 200) or 200)
+        self.kid_min_step = int(getattr(self.gen.config, 'kid_min_step', 0) or 0)
         self._kid_inception = None
         self._kid_real_features = None
         self.best_kid = self._load_best_kid()
@@ -727,13 +728,19 @@ class Trainer:
             self.metrics.write_event("kid_failed", global_step=int(self.global_step), error=str(exc)[:500])
             return None
 
-        improved = score["kid_mean"] < self.best_kid
+        # Scores before kid_min_step are logged but cannot claim best_kid/: in
+        # Arm B the step-1k checkpoint (yellow cast, no vignette, 9.6%
+        # saturated) out-scored every checkpoint to 14k that visibly matched
+        # the reals better and was more diverse.
+        eligible = self.global_step >= self.kid_min_step
+        improved = eligible and score["kid_mean"] < self.best_kid
         print(f"KID @ step {self.global_step}: {score['kid_mean']:.5f} +/- {score['kid_se']:.5f} "
-              f"(best: {min(self.best_kid, score['kid_mean']):.5f}{', new' if improved else ''})", flush=True)
+              f"(best: {score['kid_mean'] if improved else self.best_kid:.5f}"
+              f"{', new' if improved else ''}{'' if eligible else ', warm-up'})", flush=True)
         self.metrics.write_event("kid", global_step=int(self.global_step),
                                  critic_updates=int(getattr(self, "critic_updates", 0)),
                                  n_gen=int(self.kid_samples), n_real=int(len(self._kid_real_features)),
-                                 best=bool(improved), **score)
+                                 best=bool(improved), eligible=bool(eligible), **score)
         if improved:
             self.best_kid = score["kid_mean"]
             best_dir = self._best_kid_dir()
