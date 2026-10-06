@@ -113,6 +113,38 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
 | **1z-B** | 09-23 | 1z-A | **only change: `--spectral_norm --disc_lambda_gp 1.0`** (the collapsed runs' recipe) | same | nn_dist **0.570 → 0.292**; diversity **0.372**; ‖dD/dx‖ settles **0.35–0.42** (over-smoothed) with λ·GP stuck at 0.33–0.47 | ✅ fits — hypothesis **not** confirmed at this scale; mechanism corrected (see above) |
 | **0** | 09-23 | HEAD + Phase 0 | **control: does current code train the structure-era recipe from scratch?** disc 2 : gen 3, λ_gp 10, **no SN**, no clip, no decay, no EMA, no ADA, no multiscale, seed 42 | magnified_profile **512**, 10,000 steps = 20,000 critic updates, 133 min on RTX 5080 | **‖dD/dx‖ 1.046 (real) / 1.030 (interp) / 1.081 (fake)**; \|W\| 1.0 vs 1774 ceiling; λ·GP 25.4% of loss; **latent diversity 0.609** (released model 0.490, dead runs 0.00003); std 0.583; saturated 3.35%; samples show the crystal-mesh motif, two latents visibly different | **✅ PASSES** |
 
+**A1 replicate, paired verdict (2026-10-06): TIE at seed 43. The anneal's effect is
+small at best.** `noise_seed43` was extended 40k → 80k (flat LR, same seed/split,
+`--cleanup_milestone 0` so its 31–39k probe snapshots survive; commit 8ca8aae) to give
+A1-s43 a same-split baseline. Windows matched on recorded `fade_step` (snapshot names lag
+the step after a restart: A1-s43 scored 70,409–79,409, baseline 70,000–79,000).
+
+| seed | A1 window KID | baseline window KID | Δ (A1 − base) | 2 × pooled SE | verdict | ρ A1 / base |
+|---|---|---|---|---|---|---|
+| 42 | 0.2270 ± 0.0162 | 0.2987 ± 0.0240 | −0.0717 | 0.058 | A1 better (|t| 2.47) | −0.95 / +0.15 |
+| 43 | 0.3108 ± 0.0217 | 0.3251 ± 0.0272 | −0.0144 | 0.070 | **tie** (|t| 0.41) | +0.72 / +0.33 |
+
+A stronger, fully paired read comes from the in-training KID, which both seed-43 runs
+logged at the same global steps with **identical latents** (dedicated RNG seeded off
+seed 43) and identical reals. Over the 40 shared checkpoints (41k–80k): A1 − baseline =
+**−0.021 ± 0.015**, with A1 lower at 19 of 40 steps. That is 41–60k −0.017 ± 0.024 and
+60–80k −0.034 ± 0.020.
+
+**Reading.**
+- Across two seeds the anneal's effect runs from about −0.07 down to −0.01. The sign is
+  consistent, but it is not resolvable at seed 43. A1-s42's headline result was mostly
+  that seed's draw.
+- **Best-KID selection matters more than the anneal.** The flat-LR baseline's best
+  in-training checkpoint (74k, **0.222**) beats A1-s43's best (56k, 0.243). Picking the
+  right checkpoint from a plain run did as well as the schedule did.
+- ‖∇D‖ over 70–80k: A1 1.555 vs baseline **1.880** at seed 43; 1.319 vs 1.595 at seed 42.
+  That is about 0.3 lower in both seeds. This revives, at modest strength, the
+  Lipschitz-damping claim retracted above: two seeds now agree in sign and size. Weight
+  movement: baseline 0.189/1k vs A1 0.0115.
+- At seed 43, a 0.33 gap in ‖∇D‖ came with a KID tie. So no measurement yet links critic
+  escape to sample quality. Arm B is the direct test of whether it matters; until then
+  "escape drives late degradation" remains a hypothesis.
+
 **A1 replicate at seed 43 (2026-10-05): A1's trend signature did NOT replicate.**
 `arm_a1_s43`: A1's exact recipe (`--lr_decay cosine --lr_decay_steps 80000 --lr_min 1e-6
 --fade_steps 1`), `SEED=43`, 80k steps, 27 h, one RSS restart. First run with best-KID
