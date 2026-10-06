@@ -474,7 +474,7 @@ Full write-up and the campaign that acts on them:
     biased low. Re-score `best_kid/` with `kid_check.py` at a different `--seed` before
     reporting it. It scores the primary weights, not the EMA shadow. Its latents differ
     from `kid_check.py`'s, so the two agree in distribution, not to the digit.
-    **Follow-up 2026-10-07 — warm-up floor (`--kid_min_step`, script default 20k).** In
+    **Follow-up 2026-10-06 — warm-up floor (`--kid_min_step`, script default 20k).** In
     Arm B the step-1k checkpoint scored 0.329 and beat every checkpoint up to 14k
     (0.37–0.87). It looked worse: a yellow cast, no vignette, 9.6% saturated, and latent
     diversity 0.48 against step 10k's 0.56. The 10k model has the reals' dark vignette,
