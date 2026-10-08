@@ -481,6 +481,10 @@ Full write-up and the campaign that acts on them:
     white grains and blue cells. So early in training, KID can rank a visibly worse model
     first. Scores below the floor are still logged (`eligible: false`) but cannot claim
     `best_kid/`.
+    **Follow-up 2026-10-08 — EMA.** With `ema_decay > 0` the in-training KID scores the
+    EMA shadow, the model the run is producing. Each record carries `weights`
+    (`ema`/`primary`), and `kid.json` names the `weights_file` to re-score. The swap
+    sits in try/finally, so a failed eval cannot leave training on EMA weights.
 
 ## Tier 🟠 — production readiness (do before calling this a product)
 
