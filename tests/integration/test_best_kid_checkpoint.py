@@ -63,6 +63,80 @@ def test_new_minimum_saves_and_a_worse_score_does_not_overwrite(trainer, monkeyp
     assert os.path.exists(os.path.join(trainer.save_dir, "best_kid", "generator_config.json"))
 
 
+def test_warm_up_scores_are_logged_but_cannot_claim_best(trainer, monkeypatch):
+    """Arm B: the step-1k checkpoint out-scored every checkpoint to 14k while
+    looking visibly worse. Below kid_min_step a score is recorded, not saved."""
+    trainer.kid_min_step = 10
+    _script_scores(monkeypatch, [0.10, 0.30, 0.20])
+    for step in (5, 10, 15):
+        trainer.global_step = step
+        trainer._evaluate_kid()
+
+    record = _record(trainer)
+    assert record["global_step"] == 15 and record["kid_mean"] == 0.20
+    events = [json.loads(line) for line in open(f"{trainer.save_dir}/metrics.jsonl", encoding="utf-8")]
+    kid = [e for e in events if e.get("event") == "kid"]
+    assert [(e["global_step"], e["eligible"], e["best"]) for e in kid] == [
+        (5, False, False), (10, True, True), (15, True, True)]
+
+
+def _features_of_current_weights(trainer):
+    """What _kid_fake_features computes, with no EMA swap: the same z."""
+    seed = int(getattr(trainer.gen.config, "seed", 42)) + 2
+    z = tf.random.Generator.from_seed(seed).normal([trainer.kid_samples, trainer.gen.config.latent_dim])
+    return _stub_features(trainer.gen.model(z, training=False))
+
+
+def _ema_trainer(trainer):
+    trainer.ema_decay = 0.999
+    trainer._init_ema()
+    for var in trainer.ema_weights:          # make the shadow distinguishable
+        var.assign(var + 0.05)
+    return [w.numpy().copy() for w in trainer.gen.model.trainable_variables]
+
+
+def _unchanged(trainer, live):
+    return all(np.array_equal(a, w.numpy()) for a, w in zip(live, trainer.gen.model.trainable_variables))
+
+
+def test_with_ema_on_the_shadow_is_scored_and_training_weights_restored(trainer, monkeypatch):
+    live = _ema_trainer(trainer)
+    raw = _features_of_current_weights(trainer)
+
+    scored = trainer._kid_fake_features()
+    assert _unchanged(trainer, live), "EMA swap leaked into the training weights"
+
+    backup = trainer._apply_ema_to_generator()
+    shadow = _features_of_current_weights(trainer)
+    trainer._restore_generator_weights(backup)
+    assert np.allclose(scored, shadow, atol=1e-5)
+    assert not np.allclose(scored, raw, atol=1e-5)
+
+    _script_scores(monkeypatch, [0.2])
+    trainer.global_step = 5
+    trainer._evaluate_kid()
+    record = _record(trainer)
+    assert (record["weights"], record["weights_file"]) == ("ema", "generator_ema.weights.h5")
+
+
+def test_without_ema_the_primary_weights_are_scored(trainer, monkeypatch):
+    _script_scores(monkeypatch, [0.2])
+    trainer.global_step = 5
+    trainer._evaluate_kid()
+    assert _record(trainer)["weights"] == "primary"
+
+
+def test_ema_swap_is_undone_when_the_eval_fails(trainer, monkeypatch):
+    live = _ema_trainer(trainer)
+
+    def boom(*a, **k):
+        raise RuntimeError("OOM in the Inception pass")
+    monkeypatch.setattr(kid_module, "inception_features", boom)
+    trainer.global_step = 5
+    assert trainer._evaluate_kid() is None
+    assert _unchanged(trainer, live)
+
+
 def test_cadence_skips_off_steps_and_step_zero(trainer, monkeypatch):
     calls = []
     monkeypatch.setattr(trainer, "_evaluate_kid", lambda: calls.append(trainer.global_step))

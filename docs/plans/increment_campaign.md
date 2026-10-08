@@ -226,6 +226,31 @@ change and therefore a *separate tuning run within this arm*, not part of the fi
 novelty). **If false:** no change, or diversity drops below the gate — augmentation too
 strong for the generator's capacity.
 
+### Arm D — generator EMA (added 2026-10-08, pre-registered before launch)
+
+**Why it jumped the queue.** Arms A and B each lowered late ‖∇D‖ by 0.24–0.33 and each
+tied on KID (experiments.md). What dominates every comparison is checkpoint-to-checkpoint
+KID spread (window std 0.05–0.09), and the anneal reduced it only by freezing the model.
+An exponential moving average of generator weights attacks that spread directly while
+the raw model keeps learning.
+
+**Change:** `--ema_decay 0.999` on control_1024's recipe. Nothing else changes: seed 42,
+same split, flat LR, λ_gp 10, 80k steps. The EMA shadow does not feed back into
+training, so the raw weights follow the same dynamics as the baseline.
+
+**Scored on:** the EMA shadow (`kid_check.py --weights_file generator_ema.weights.h5`,
+and in-training KID scores the shadow automatically when EMA is on).
+
+**Primary:** the §2 decision rule on the 70–79k window, EMA shadow vs control_1024.
+**Secondary (pre-registered):** window KID std. EMA "works as intended" if the shadow's
+std is below half the baseline's (0.076 → < 0.038). **Free within-run control:** the same
+run's raw `generator.weights.h5` over the same window. Same trajectory, so the
+EMA-vs-raw difference isolates averaging from run-to-run noise.
+
+**If false:** the window ties and std does not fall. Then the spread does not come from
+the weights wobbling fast around a good point; it comes from slower drift, which
+averaging over ~1k steps cannot remove.
+
 ---
 
 ## 5. What each arm cannot tell us
