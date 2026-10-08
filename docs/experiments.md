@@ -113,6 +113,38 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
 | **1z-B** | 09-23 | 1z-A | **only change: `--spectral_norm --disc_lambda_gp 1.0`** (the collapsed runs' recipe) | same | nn_dist **0.570 → 0.292**; diversity **0.372**; ‖dD/dx‖ settles **0.35–0.42** (over-smoothed) with λ·GP stuck at 0.33–0.47 | ✅ fits — hypothesis **not** confirmed at this scale; mechanism corrected (see above) |
 | **0** | 09-23 | HEAD + Phase 0 | **control: does current code train the structure-era recipe from scratch?** disc 2 : gen 3, λ_gp 10, **no SN**, no clip, no decay, no EMA, no ADA, no multiscale, seed 42 | magnified_profile **512**, 10,000 steps = 20,000 critic updates, 133 min on RTX 5080 | **‖dD/dx‖ 1.046 (real) / 1.030 (interp) / 1.081 (fake)**; \|W\| 1.0 vs 1774 ceiling; λ·GP 25.4% of loss; **latent diversity 0.609** (released model 0.490, dead runs 0.00003); std 0.583; saturated 3.35%; samples show the crystal-mesh motif, two latents visibly different | **✅ PASSES** |
 
+**Arm B — `lambda_gp 20` (2026-10-07): critic escape damped, KID tie.**
+`arm_b_gp20`: control_1024's recipe with one change, `--disc_lambda_gp 20.0`. Flat LR,
+seed 42 (same split, same 344 reals), 80k steps, 27 h, one RSS restart, commit 6ae5d70.
+Windows matched on `fade_step`: B 70,572–79,572, control 70,706–79,706. control_1024's
+window was re-scored and reproduced exactly (0.2987, ρ +0.15).
+
+| | window KID mean ± SE | ρ | ‖∇D‖ 70–80k | weight movement /1k | best checkpoint (re-scored, `--seed 1`) |
+|---|---|---|---|---|---|
+| control_1024 (λ 10) | 0.2987 ± 0.0240 | +0.15 | 1.595 | 0.167 | 77k: 0.222 (from 39 surviving snapshots) |
+| **Arm B (λ 20)** | 0.2825 ± 0.0168 | −0.21 | **1.354** | 0.182 | 69k: 0.192 (from 61 eligible in-training evals) |
+
+Δ −0.016, 2 × pooled SE 0.059, |t| 0.55 → **tie**.
+
+‖∇D‖ by decade, B vs control: 20k 1.048/1.052, 40k 1.115/1.330, 60k 1.316/1.496, 70k
+1.354/1.595. The penalty slows the escape (about 15% lower late) but does not stop it.
+Weight movement matches the baseline, so unlike Arm A there is no freezing confound.
+
+The best-checkpoint gap (0.192 vs 0.222) is not evidence. B's best is the minimum over
+more candidates (61 vs 39), and the minimum of more noisy draws is lower by
+construction.
+
+**Reading — the Lipschitz lever is ruled out at this range.** Two independent
+interventions have now lowered late ‖∇D‖ by 0.24–0.33: the anneal (A1-s43, 1.56 vs 1.88)
+and λ_gp 20 (1.35 vs 1.60). Both gave a KID tie. Critic escape in the 1.3–1.9 range is not
+what limits sample quality here. What dominates every run is checkpoint-to-checkpoint KID
+spread (window std 0.05–0.09), which none of the three arms reduced without freezing the
+model.
+
+Early-step artifact found during this run: the step-1k checkpoint held `best_kid/` until
+21k (0.329) despite looking visibly worse. Fixed by `--kid_min_step` (UPGRADES #68
+follow-up).
+
 **A1 replicate, paired verdict (2026-10-06): TIE at seed 43. The anneal's effect is
 small at best.** `noise_seed43` was extended 40k → 80k (flat LR, same seed/split,
 `--cleanup_milestone 0` so its 31–39k probe snapshots survive; commit 8ca8aae) to give
