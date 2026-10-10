@@ -113,6 +113,46 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
 | **1z-B** | 09-23 | 1z-A | **only change: `--spectral_norm --disc_lambda_gp 1.0`** (the collapsed runs' recipe) | same | nn_dist **0.570 → 0.292**; diversity **0.372**; ‖dD/dx‖ settles **0.35–0.42** (over-smoothed) with λ·GP stuck at 0.33–0.47 | ✅ fits — hypothesis **not** confirmed at this scale; mechanism corrected (see above) |
 | **0** | 09-23 | HEAD + Phase 0 | **control: does current code train the structure-era recipe from scratch?** disc 2 : gen 3, λ_gp 10, **no SN**, no clip, no decay, no EMA, no ADA, no multiscale, seed 42 | magnified_profile **512**, 10,000 steps = 20,000 critic updates, 133 min on RTX 5080 | **‖dD/dx‖ 1.046 (real) / 1.030 (interp) / 1.081 (fake)**; \|W\| 1.0 vs 1774 ceiling; λ·GP 25.4% of loss; **latent diversity 0.609** (released model 0.490, dead runs 0.00003); std 0.583; saturated 3.35%; samples show the crystal-mesh motif, two latents visibly different | **✅ PASSES** |
 
+**Arm D — generator EMA 0.999 (2026-10-10): every checkpoint becomes a good one;
+the gain over the baseline is probable, not established.** `arm_d_ema`: control_1024's
+recipe plus `--ema_decay 0.999`. Seed 42 (same split, same 344 reals), 80k steps, 28 h,
+one RSS restart, commit 4b90eed. Pre-registered in increment_campaign §4. Windows matched
+on `fade_step` (D 70,702–79,702 vs control 70,706–79,706).
+
+Window KID at each scoring seed:
+
+| scoring seed | EMA shadow | raw weights (same run) | control_1024 | EMA − control |
+|---|---|---|---|---|
+| 0 | 0.2415 ± 0.0014 | 0.3238 ± 0.0133 | 0.2987 ± 0.0240 | −0.057 |
+| 1 | 0.2608 ± 0.0012 | 0.3469 ± 0.0151 | 0.3043 ± 0.0244 | −0.044 |
+| 2 | 0.2639 ± 0.0011 | 0.3382 ± 0.0154 | 0.3047 ± 0.0227 | −0.041 |
+| **3-seed** | **0.2554 ± 0.0071** | 0.3363 ± 0.0155 | 0.3026 ± 0.0239 | **−0.047** |
+
+(3-seed SE per the §2 amendment: `sqrt(SE_ckpt² + σ_seed²/3)`.)
+
+- **Primary (EMA vs control): borderline.** As pre-registered (seed 0 only) it passes:
+  0.057 > 0.048. With the sample-set noise the protocol omitted, 0.047 < 0.050
+  (|t| = 1.9) and it narrowly fails. Recorded as **probable, not established**. The
+  amendment was written after seeing this result, so it is applied going forward and
+  not used to re-decide Arm D.
+- **Secondary (window spread < 0.038): decisive pass at every seed.** EMA std
+  0.0034–0.0043 vs control 0.072–0.077, about 20× smaller. All 10 EMA checkpoints at
+  seed 0 lie between 0.233 and 0.247.
+- **Within-run control: the gain is pure averaging.** EMA beats the same run's raw
+  weights by 0.074–0.086 at every seed. The raw weights tie control (0.336 vs 0.303),
+  so training dynamics were baseline-like.
+- **The peak is not higher.** EMA's best_kid (57k) re-scores at 0.234 (seed 1).
+  control_1024's best surviving snapshot (77k) is 0.222 (seed 1). EMA does not find a
+  better model; it makes *every* checkpoint about as good as the raw run's lucky one.
+  It was never beaten after 57k (in-training KID 70–80k: 0.244–0.266).
+
+**Reading.** The checkpoint-to-checkpoint KID spread that dominated Arms A and B is
+fast weight jitter around a good region, and a ~1k-step average removes it. That
+answers the §4 "if false" branch: it is not slow drift. The practical effect is
+reliability. Any late EMA checkpoint is near the best, so the run no longer depends on
+checkpoint selection. Replicate at seed 43 vs `noise_seed43` launched 2026-10-10
+(`arm_d_ema_s43`, commit 4b90eed), scored under the §2 amendment.
+
 **Arm B — `lambda_gp 20` (2026-10-07): critic escape damped, KID tie.**
 `arm_b_gp20`: control_1024's recipe with one change, `--disc_lambda_gp 20.0`. Flat LR,
 seed 42 (same split, same 344 reals), 80k steps, 27 h, one RSS restart, commit 6ae5d70.

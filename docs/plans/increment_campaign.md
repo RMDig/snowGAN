@@ -125,6 +125,23 @@ window discards the trend that claim is about. Arm A: ρ = −0.95 converging; b
 Reporting both is mandatory, including when they disagree — a split verdict is a real
 result, not a thing to resolve by preference.
 
+**Amendment (2026-10-10, applies from the Arm D replicate onward): score at three seeds
+and include sample-set noise.** `kid_check.py --seed` fixes both the generated latents
+and the subset draws, so all 10 checkpoints of a window share one sample set. SE over
+checkpoints therefore omits the sample-set noise, a common offset of about ±0.012 (Arm D
+EMA window: 0.2415 / 0.2608 / 0.2639 at seeds 0 / 1 / 2). For a noisy run that term is
+swamped. For a low-spread run such as EMA (checkpoint SE 0.0014) it *is* the
+uncertainty, and leaving it out let Arm D pass the formula at seed 0 while sitting at
+1.9σ once it is included.
+
+From now on each window is scored at seeds 0, 1 and 2:
+
+- `KID_mean` = mean over the 3 seeds of the 10-checkpoint window means.
+- `SE² = SE_ckpt² + σ_seed² / 3`, where `SE_ckpt` is the mean over seeds of the
+  checkpoint SE and `σ_seed` is the std (ddof 1) of the three window means. Checkpoint
+  noise does not average down across seeds (same checkpoints); sample-set noise does.
+- Criterion 1 is then applied unchanged with these SEs.
+
 ### The freezing control (mandatory from Arm A onward)
 
 Any arm that reduces KID variance must report **relative generator weight movement per
