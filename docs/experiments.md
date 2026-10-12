@@ -113,8 +113,41 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
 | **1z-B** | 09-23 | 1z-A | **only change: `--spectral_norm --disc_lambda_gp 1.0`** (the collapsed runs' recipe) | same | nn_dist **0.570 → 0.292**; diversity **0.372**; ‖dD/dx‖ settles **0.35–0.42** (over-smoothed) with λ·GP stuck at 0.33–0.47 | ✅ fits — hypothesis **not** confirmed at this scale; mechanism corrected (see above) |
 | **0** | 09-23 | HEAD + Phase 0 | **control: does current code train the structure-era recipe from scratch?** disc 2 : gen 3, λ_gp 10, **no SN**, no clip, no decay, no EMA, no ADA, no multiscale, seed 42 | magnified_profile **512**, 10,000 steps = 20,000 critic updates, 133 min on RTX 5080 | **‖dD/dx‖ 1.046 (real) / 1.030 (interp) / 1.081 (fake)**; \|W\| 1.0 vs 1774 ceiling; λ·GP 25.4% of loss; **latent diversity 0.609** (released model 0.490, dead runs 0.00003); std 0.583; saturated 3.35%; samples show the crystal-mesh motif, two latents visibly different | **✅ PASSES** |
 
+**Arm D replicate at seed 43 (2026-10-11): REPLICATED. EMA beats the same-seed
+baseline at |t| = 3.0.** `arm_d_ema_s43`: Arm D's recipe at `SEED=43` (same split and same
+609 reals as `noise_seed43`), 80k steps, 28 h, one RSS restart, commit 4b90eed. Scored
+under the §2 amendment (seeds 0/1/2, `SE² = SE_ckpt² + σ_seed²/3`). Windows matched on
+`fade_step`: D 70,822–79,822; baseline 71,000–80,000 (`batch_70000`–`batch_78000` plus
+the final checkpoint).
+
+| | per-seed window means (0 / 1 / 2) | window std | ρ (seed 0) | 3-seed KID ± SE |
+|---|---|---|---|---|
+| **EMA shadow** | 0.2607 / 0.2640 / 0.2453 | 0.025–0.029 | **−0.87** | **0.2567 ± 0.0104** |
+| raw weights (same run) | 0.3183 / 0.3180 / 0.3081 | 0.062–0.073 | +0.61 | 0.3148 ± 0.0217 |
+| noise_seed43 (baseline) | 0.3441 / 0.3446 / 0.3449 | 0.084–0.089 | +0.27 | 0.3445 ± 0.0274 |
+
+| comparison | Δ | 2 × pooled SE | |t| | verdict |
+|---|---|---|---|---|
+| **EMA − baseline (primary)** | **−0.088** | 0.059 | **3.00** | **distinguishable** |
+| EMA − raw (within run) | −0.058 | 0.048 | 2.42 | distinguishable |
+| raw − baseline | −0.030 | 0.070 | 0.85 | tie |
+
+- **Primary: pass, with margin**, under the stricter three-seed rule that Arm D (seed 42)
+  narrowly failed. Seed 42 gave −0.047 (1.9σ) and seed 43 gives −0.088 (3.0σ). Same sign
+  and same mechanism (raw ties baseline, so the gain is averaging) at both seeds.
+- **Secondary (std < half the baseline's): pass**, 0.027 vs 0.087, but 3× smaller rather
+  than seed 42's 20×. **The residual spread is a trend, not jitter**: EMA KID falls across
+  the window (seed 0: 0.281 → 0.211–0.229, ρ −0.87), and in-training KID set its best at
+  the final step (0.222 at 80k). At seed 43 the averaged model was still improving when
+  the run stopped.
+- **Verdict on Arm D overall: adopt EMA 0.999.** Replicated across two seeds and two
+  splits. It removes checkpoint-to-checkpoint wobble without freezing learning, and at
+  seed 43 the averaged model is still improving at 80k, so a longer horizon is the
+  natural next test.
+
 **Arm D — generator EMA 0.999 (2026-10-10): every checkpoint becomes a good one;
-the gain over the baseline is probable, not established.** `arm_d_ema`: control_1024's
+the gain over the baseline is probable, not established at this seed (replicated at
+seed 43; see above).** `arm_d_ema`: control_1024's
 recipe plus `--ema_decay 0.999`. Seed 42 (same split, same 344 reals), 80k steps, 28 h,
 one RSS restart, commit 4b90eed. Pre-registered in increment_campaign §4. Windows matched
 on `fade_step` (D 70,702–79,702 vs control 70,706–79,706).
