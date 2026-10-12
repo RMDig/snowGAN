@@ -245,6 +245,26 @@ strong for the generator's capacity.
 
 ---
 
+### Horizon run — EMA to 160k (pre-registered 2026-10-12, before launch)
+
+**Question:** where does the EMA model level off? At seed 43 it was still improving at 80k
+(window ρ −0.87, best at the final step).
+
+**Design:** resume `arm_d_ema_s43` then `arm_d_ema` from 80k to 160k, same recipe. Flat
+LR, so resuming continues the same trajectory, and the EMA shadow reloads from
+`generator_ema.weights.h5`. `--cleanup_milestone 0` so the scored 70–79k windows
+survive. This is within-run only: no baseline extends past 100k, so the run cannot say
+whether EMA's *advantage* grows. It can only say whether training longer helps an EMA
+model.
+
+**Measure:** EMA window KID at 150–159k vs the same run's 70–79k, under the §2 amendment
+(seeds 0/1/2). **Longer training helps** at a seed if the 150–159k window is lower by the
+§2 formula. **It has levelled off** if the windows tie, and the plateau step is then read
+off the in-training KID curve (first 10k window whose mean is within 2 × SE of the final
+window's). Verdict per seed, both reported.
+
+---
+
 ## 5. What each arm cannot tell us
 
 - None of these touch the **downstream probe**, which §9 calls the real objective and
