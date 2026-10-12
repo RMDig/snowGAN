@@ -113,6 +113,182 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
 | **1z-B** | 09-23 | 1z-A | **only change: `--spectral_norm --disc_lambda_gp 1.0`** (the collapsed runs' recipe) | same | nn_dist **0.570 → 0.292**; diversity **0.372**; ‖dD/dx‖ settles **0.35–0.42** (over-smoothed) with λ·GP stuck at 0.33–0.47 | ✅ fits — hypothesis **not** confirmed at this scale; mechanism corrected (see above) |
 | **0** | 09-23 | HEAD + Phase 0 | **control: does current code train the structure-era recipe from scratch?** disc 2 : gen 3, λ_gp 10, **no SN**, no clip, no decay, no EMA, no ADA, no multiscale, seed 42 | magnified_profile **512**, 10,000 steps = 20,000 critic updates, 133 min on RTX 5080 | **‖dD/dx‖ 1.046 (real) / 1.030 (interp) / 1.081 (fake)**; \|W\| 1.0 vs 1774 ceiling; λ·GP 25.4% of loss; **latent diversity 0.609** (released model 0.490, dead runs 0.00003); std 0.583; saturated 3.35%; samples show the crystal-mesh motif, two latents visibly different | **✅ PASSES** |
 
+**Arm D replicate at seed 43 (2026-10-11): REPLICATED. EMA beats the same-seed
+baseline at |t| = 3.0.** `arm_d_ema_s43`: Arm D's recipe at `SEED=43` (same split and same
+609 reals as `noise_seed43`), 80k steps, 28 h, one RSS restart, commit 4b90eed. Scored
+under the §2 amendment (seeds 0/1/2, `SE² = SE_ckpt² + σ_seed²/3`). Windows matched on
+`fade_step`: D 70,822–79,822; baseline 71,000–80,000 (`batch_70000`–`batch_78000` plus
+the final checkpoint).
+
+| | per-seed window means (0 / 1 / 2) | window std | ρ (seed 0) | 3-seed KID ± SE |
+|---|---|---|---|---|
+| **EMA shadow** | 0.2607 / 0.2640 / 0.2453 | 0.025–0.029 | **−0.87** | **0.2567 ± 0.0104** |
+| raw weights (same run) | 0.3183 / 0.3180 / 0.3081 | 0.062–0.073 | +0.61 | 0.3148 ± 0.0217 |
+| noise_seed43 (baseline) | 0.3441 / 0.3446 / 0.3449 | 0.084–0.089 | +0.27 | 0.3445 ± 0.0274 |
+
+| comparison | Δ | 2 × pooled SE | |t| | verdict |
+|---|---|---|---|---|
+| **EMA − baseline (primary)** | **−0.088** | 0.059 | **3.00** | **distinguishable** |
+| EMA − raw (within run) | −0.058 | 0.048 | 2.42 | distinguishable |
+| raw − baseline | −0.030 | 0.070 | 0.85 | tie |
+
+- **Primary: pass, with margin**, under the stricter three-seed rule that Arm D (seed 42)
+  narrowly failed. Seed 42 gave −0.047 (1.9σ) and seed 43 gives −0.088 (3.0σ). Same sign
+  and same mechanism (raw ties baseline, so the gain is averaging) at both seeds.
+- **Secondary (std < half the baseline's): pass**, 0.027 vs 0.087, but 3× smaller rather
+  than seed 42's 20×. **The residual spread is a trend, not jitter**: EMA KID falls across
+  the window (seed 0: 0.281 → 0.211–0.229, ρ −0.87), and in-training KID set its best at
+  the final step (0.222 at 80k). At seed 43 the averaged model was still improving when
+  the run stopped.
+- **Verdict on Arm D overall: adopt EMA 0.999.** Replicated across two seeds and two
+  splits. It removes checkpoint-to-checkpoint wobble without freezing learning, and at
+  seed 43 the averaged model is still improving at 80k, so a longer horizon is the
+  natural next test.
+
+**Arm D — generator EMA 0.999 (2026-10-10): every checkpoint becomes a good one;
+the gain over the baseline is probable, not established at this seed (replicated at
+seed 43; see above).** `arm_d_ema`: control_1024's
+recipe plus `--ema_decay 0.999`. Seed 42 (same split, same 344 reals), 80k steps, 28 h,
+one RSS restart, commit 4b90eed. Pre-registered in increment_campaign §4. Windows matched
+on `fade_step` (D 70,702–79,702 vs control 70,706–79,706).
+
+Window KID at each scoring seed:
+
+| scoring seed | EMA shadow | raw weights (same run) | control_1024 | EMA − control |
+|---|---|---|---|---|
+| 0 | 0.2415 ± 0.0014 | 0.3238 ± 0.0133 | 0.2987 ± 0.0240 | −0.057 |
+| 1 | 0.2608 ± 0.0012 | 0.3469 ± 0.0151 | 0.3043 ± 0.0244 | −0.044 |
+| 2 | 0.2639 ± 0.0011 | 0.3382 ± 0.0154 | 0.3047 ± 0.0227 | −0.041 |
+| **3-seed** | **0.2554 ± 0.0071** | 0.3363 ± 0.0161 | 0.3026 ± 0.0238 | **−0.047** |
+
+(3-seed SE per the §2 amendment: `sqrt(SE_ckpt² + σ_seed²/3)`.)
+
+- **Primary (EMA vs control): borderline.** As pre-registered (seed 0 only) it passes:
+  0.057 > 0.048. With the sample-set noise the protocol omitted, 0.047 < 0.050
+  (|t| = 1.9) and it narrowly fails. Recorded as **probable, not established**. The
+  amendment was written after seeing this result, so it is applied going forward and
+  not used to re-decide Arm D.
+- **Secondary (window spread < 0.038): decisive pass at every seed.** EMA std
+  0.0034–0.0043 vs control 0.072–0.077, about 20× smaller. All 10 EMA checkpoints at
+  seed 0 lie between 0.233 and 0.247.
+- **Within-run control: the gain is pure averaging.** EMA beats the same run's raw
+  weights by 0.074–0.086 at every seed. The raw weights tie control (0.336 vs 0.303),
+  so training dynamics were baseline-like.
+- **The peak is not higher.** EMA's best_kid (57k) re-scores at 0.234 (seed 1).
+  control_1024's best surviving snapshot (77k) is 0.222 (seed 1). EMA does not find a
+  better model; it makes *every* checkpoint about as good as the raw run's lucky one.
+  It was never beaten after 57k (in-training KID 70–80k: 0.244–0.266).
+
+**Reading.** The checkpoint-to-checkpoint KID spread that dominated Arms A and B is
+fast weight jitter around a good region, and a ~1k-step average removes it. That
+answers the §4 "if false" branch: it is not slow drift. The practical effect is
+reliability. Any late EMA checkpoint is near the best, so the run no longer depends on
+checkpoint selection. Replicate at seed 43 vs `noise_seed43` launched 2026-10-10
+(`arm_d_ema_s43`, commit 4b90eed), scored under the §2 amendment.
+
+**Arm B — `lambda_gp 20` (2026-10-07): critic escape damped, KID tie.**
+`arm_b_gp20`: control_1024's recipe with one change, `--disc_lambda_gp 20.0`. Flat LR,
+seed 42 (same split, same 344 reals), 80k steps, 27 h, one RSS restart, commit 6ae5d70.
+Windows matched on `fade_step`: B 70,572–79,572, control 70,706–79,706. control_1024's
+window was re-scored and reproduced exactly (0.2987, ρ +0.15).
+
+| | window KID mean ± SE | ρ | ‖∇D‖ 70–80k | weight movement /1k | best checkpoint (re-scored, `--seed 1`) |
+|---|---|---|---|---|---|
+| control_1024 (λ 10) | 0.2987 ± 0.0240 | +0.15 | 1.595 | 0.167 | 77k: 0.222 (from 39 surviving snapshots) |
+| **Arm B (λ 20)** | 0.2825 ± 0.0168 | −0.21 | **1.354** | 0.182 | 69k: 0.192 (from 61 eligible in-training evals) |
+
+Δ −0.016, 2 × pooled SE 0.059, |t| 0.55 → **tie**.
+
+‖∇D‖ by decade, B vs control: 20k 1.048/1.052, 40k 1.115/1.330, 60k 1.316/1.496, 70k
+1.354/1.595. The penalty slows the escape (about 15% lower late) but does not stop it.
+Weight movement matches the baseline, so unlike Arm A there is no freezing confound.
+
+The best-checkpoint gap (0.192 vs 0.222) is not evidence. B's best is the minimum over
+more candidates (61 vs 39), and the minimum of more noisy draws is lower by
+construction.
+
+**Reading — the Lipschitz lever is ruled out at this range.** Two independent
+interventions have now lowered late ‖∇D‖ by 0.24–0.33: the anneal (A1-s43, 1.56 vs 1.88)
+and λ_gp 20 (1.35 vs 1.60). Both gave a KID tie. Critic escape in the 1.3–1.9 range is not
+what limits sample quality here. What dominates every run is checkpoint-to-checkpoint KID
+spread (window std 0.05–0.09), which none of the three arms reduced without freezing the
+model.
+
+Early-step artifact found during this run: the step-1k checkpoint held `best_kid/` until
+21k (0.329) despite looking visibly worse. Fixed by `--kid_min_step` (UPGRADES #68
+follow-up).
+
+**A1 replicate, paired verdict (2026-10-06): TIE at seed 43. The anneal's effect is
+small at best.** `noise_seed43` was extended 40k → 80k (flat LR, same seed/split,
+`--cleanup_milestone 0` so its 31–39k probe snapshots survive; commit 8ca8aae) to give
+A1-s43 a same-split baseline. Windows matched on recorded `fade_step` (snapshot names lag
+the step after a restart: A1-s43 scored 70,409–79,409, baseline 70,000–79,000).
+
+| seed | A1 window KID | baseline window KID | Δ (A1 − base) | 2 × pooled SE | verdict | ρ A1 / base |
+|---|---|---|---|---|---|---|
+| 42 | 0.2270 ± 0.0162 | 0.2987 ± 0.0240 | −0.0717 | 0.058 | A1 better (|t| 2.47) | −0.95 / +0.15 |
+| 43 | 0.3108 ± 0.0217 | 0.3251 ± 0.0272 | −0.0144 | 0.070 | **tie** (|t| 0.41) | +0.72 / +0.33 |
+
+A stronger, fully paired read comes from the in-training KID, which both seed-43 runs
+logged at the same global steps with **identical latents** (dedicated RNG seeded off
+seed 43) and identical reals. Over the 40 shared checkpoints (41k–80k): A1 − baseline =
+**−0.021 ± 0.015**, with A1 lower at 19 of 40 steps. That is 41–60k −0.017 ± 0.024 and
+60–80k −0.034 ± 0.020.
+
+**Reading.**
+- Across two seeds the anneal's effect runs from about −0.07 down to −0.01. The sign is
+  consistent, but it is not resolvable at seed 43. A1-s42's headline result was mostly
+  that seed's draw.
+- **Best-KID selection matters more than the anneal.** The flat-LR baseline's best
+  in-training checkpoint (74k, **0.222**) beats A1-s43's best (56k, 0.243). Picking the
+  right checkpoint from a plain run did as well as the schedule did.
+- ‖∇D‖ over 70–80k: A1 1.555 vs baseline **1.880** at seed 43; 1.319 vs 1.595 at seed 42.
+  That is about 0.3 lower in both seeds. This revives, at modest strength, the
+  Lipschitz-damping claim retracted above: two seeds now agree in sign and size. Weight
+  movement: baseline 0.189/1k vs A1 0.0115.
+- At seed 43, a 0.33 gap in ‖∇D‖ came with a KID tie. So no measurement yet links critic
+  escape to sample quality. Arm B is the direct test of whether it matters; until then
+  "escape drives late degradation" remains a hypothesis.
+
+**A1 replicate at seed 43 (2026-10-05): A1's trend signature did NOT replicate.**
+`arm_a1_s43`: A1's exact recipe (`--lr_decay cosine --lr_decay_steps 80000 --lr_min 1e-6
+--fade_steps 1`), `SEED=43`, 80k steps, 27 h, one RSS restart. First run with best-KID
+checkpointing (`--kid_interval 1000`). Commit 73700f8.
+
+Seed 43 also changes the split (see increment_campaign §2 correction): 609 held-out images
+from 9 groups. **Absolute KID is not comparable to the seed-42 rows below.** The intended
+paired comparison (vs `noise_seed43`) is not possible either: `noise_seed43` stopped at
+39k, so there is no seed-43 baseline window at 70–79k.
+
+What *is* comparable is the within-run signature A1 was credited with:
+
+| | window KID mean ± SE | Spearman ρ | last (79k) | weight movement /1k | ‖∇D‖ 70–80k |
+|---|---|---|---|---|---|
+| A1, seed 42 | 0.2270 ± 0.0162 | **−0.95** | 0.166 (its best) | 0.0096 | 1.319 |
+| **A1, seed 43** | 0.3108 ± 0.0217 | **+0.72** | 0.385 (9th of 10) | 0.0115 | 1.555 |
+
+Per-checkpoint (kid_check, seed 0): 0.215, 0.266, 0.326, 0.239, 0.282, 0.445, 0.333,
+0.285, 0.332, 0.385. The in-training scores (different latents) track these at r = 0.76.
+
+**Reading.**
+- The monotone decline that was A1's strongest evidence (ρ −0.95, ending at its best) did
+  not recur. At seed 43, KID *rises* across the window at the same near-zero LR.
+- Weight movement was as frozen as A1-s42 (0.0115 vs 0.0096 per 1k, 15× below baseline),
+  yet KID still swung 0.21 → 0.44 between adjacent checkpoints. **Freezing the weights
+  did not stabilize the output distribution.** That undercuts the "soft early stopping"
+  reading of A1: a frozen model was supposed to be a stable one.
+- Window std 0.069, vs A1-s42 0.051 and baseline 0.076. The checkpoint-to-checkpoint KID
+  spread barely depends on the LR, so the A1-s42 ρ = −0.95 is plausibly one draw from a
+  wide distribution. A1's effect is **unreplicated**; treat Arm A as unresolved.
+- ‖∇D‖ rose to 1.555 under a near-zero LR, as A1-s42's did (1.103 → 1.319). This is the
+  one feature both seeds share: the critic escapes even when the step size cannot explain
+  it, which still points at Arm B.
+
+**Best-KID checkpointing earned its keep.** Best was step 56,000 at 0.243 in training.
+Re-scored with `kid_check.py --seed 1` it reads **0.234 ± 0.002**, so the winner's-curse
+bias was small here. The final 80k checkpoint re-scores at 0.352. Selecting by KID beat
+"take the last checkpoint" by 0.12, and beat the whole 70–79k window mean by 0.08.
+
 **Arm A2 — `lr_min 1e-5` (2026-10-03): the higher floor loses A1's benefit.**
 Identical to A1 except a 10x higher LR floor, to test whether A1 froze too early.
 KID over 70–79k vs the same windows:
