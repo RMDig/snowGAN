@@ -63,6 +63,23 @@ def test_new_minimum_saves_and_a_worse_score_does_not_overwrite(trainer, monkeyp
     assert os.path.exists(os.path.join(trainer.save_dir, "best_kid", "generator_config.json"))
 
 
+def test_warm_up_scores_are_logged_but_cannot_claim_best(trainer, monkeypatch):
+    """Arm B: the step-1k checkpoint out-scored every checkpoint to 14k while
+    looking visibly worse. Below kid_min_step a score is recorded, not saved."""
+    trainer.kid_min_step = 10
+    _script_scores(monkeypatch, [0.10, 0.30, 0.20])
+    for step in (5, 10, 15):
+        trainer.global_step = step
+        trainer._evaluate_kid()
+
+    record = _record(trainer)
+    assert record["global_step"] == 15 and record["kid_mean"] == 0.20
+    events = [json.loads(line) for line in open(f"{trainer.save_dir}/metrics.jsonl", encoding="utf-8")]
+    kid = [e for e in events if e.get("event") == "kid"]
+    assert [(e["global_step"], e["eligible"], e["best"]) for e in kid] == [
+        (5, False, False), (10, True, True), (15, True, True)]
+
+
 def test_cadence_skips_off_steps_and_step_zero(trainer, monkeypatch):
     calls = []
     monkeypatch.setattr(trainer, "_evaluate_kid", lambda: calls.append(trainer.global_step))
