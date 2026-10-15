@@ -197,6 +197,65 @@ run).** The P0.2 and P0.3 statistics as first written broke on contact with real
   memorize 64 layouts, the script only supports ≤ 256 px, and its default `save_dir` is
   `rmtree`'d, which would delete experiment 1z's artifacts.
 
+### Phase 0 results (2026-10-15/16)
+
+Outputs are in `keras/snowgan/_capdiag/`. Commit 6c16b2f; the critic re-run used raw
+fakes.
+
+**P0.2 per-scale: inconclusive at both seeds, as pre-registered.**
+
+| seed | G (layout, tile-shuffle units) | T (texture, blur units) | G / T | controls selective? |
+|---|---|---|---|---|
+| 42 | 1.33 ± 0.12 | 1.43 ± 0.14 | 0.93 ± 0.14 | yes (0.44 / 0.03) |
+| 43 | 1.39 ± 0.20 | 1.53 ± 0.11 | 0.91 ± 0.15 | yes (0.42 / 0.05) |
+
+Fakes fall short at both scales by similar amounts. Their layout mismatch is worse than
+4×4-shuffling a real image, and their texture mismatch is worse than a σ = 3 px blur.
+Neither H1 nor H2/H3 is singled out.
+
+**P0.3 critic memorization (H5): not supported.** AUC(train > held) stays at 0.43–0.62
+from 10k to 140k with no trend: growth +0.04 with ρ −0.10 at s42, growth +0.12 with ρ
++0.25 at s43 (the bar is ρ > 0.6). The critic does not separate training reals from
+held-out reals.
+
+**Unplanned finding: the critic is losing to the generator (strong evidence for H6).**
+- Scored on the **raw** fakes it trained against, the critic ranks fakes *above* real
+  images at all 11 snapshots: AUC(train > fake) from 0.05 to 0.42.
+- The training logs show the same thing independently. The critic's Wasserstein term
+  `mean D(fake) − mean D(real)` is **positive** through 0–40k (+1.2 to +2.1). D(real) >
+  D(fake) holds in only 34–46% of steps, and reaches a coin flip (0.49) only by 60k.
+- A WGAN critic is trained to make that term negative, so it is not winning its own
+  game.
+- This is consistent with F3: 10× lower LR than the generator, 2 critic : 3 generator
+  steps, batch 4, and reused reals/noise.
+- (On EMA fakes, the AUC swung 0.10–0.89; that version was confounded and is not used.)
+- **Consequence:** O1 (critic LR) and O2 (fresh critic batches) move to the front of
+  Tier A. A capacity arm on either network is not interpretable while the critic cannot
+  separate real from fake.
+
+**P0.4 spectrum (s42): no checkerboard signature (H3 weak).**
+- At native resolution the fakes have *less* power than reals at the 2-px period
+  (−0.3 dex), the opposite of a stride-2 checkerboard. There is a modest excess at 4–8 px
+  periods on the x axis only (+0.26/+0.31 dex).
+- In what Inception sees (299²), fakes lack power uniformly across mid/high frequencies
+  (−0.3 to −0.6 dex). The fakes are **missing detail, not adding artifacts.**
+- G1 is demoted.
+
+**Unplanned finding: same-seed runs are bit-identical until their first restart.** The
+training logs of arm_d_ema, control_1024 and cap_e0 agree exactly through 40k (the
+deterministic GPU path; EMA does not feed back into training). So at a fixed seed, an
+arm and E0 share data and noise streams up to the arm's change: common random numbers.
+This makes the paired comparison in §5 much sharper. It also means E0 measures
+**restart-induced divergence**, not "run-to-run variance" in the usual sense. `σ_run`
+will be read from E0 vs arm_d_ema after their first restarts.
+
+**Revised Tier A order:**
+1. O1 (disc_lr 3e-5);
+2. O2 (fresh critic batches);
+3. C1 (DiffAugment; its main premise H5 is now unsupported, but its literature prior
+   remains);
+4. D1 (drop site 0).
+
 ## 4. Phase 1: arms (each a single change on the adopted recipe)
 
 **Base:** `train_exp0_control.sh --ema_decay 0.999 --cleanup_milestone 0`, seed 42,

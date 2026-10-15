@@ -108,25 +108,25 @@ def _iter_reals(paths, resolution, chunk=16):
         yield np.stack(batch)
 
 
-def _load_generator(snapshot):
+def _load_generator(snapshot, weights_file="generator_ema.weights.h5"):
     from snowgan.models.generator import Generator
     config = _config(snapshot)
     generator = Generator(config)
     generator.model.build((None, config.latent_dim))
-    weights = os.path.join(snapshot, "generator_ema.weights.h5")
+    weights = os.path.join(snapshot, weights_file)
     if not os.path.exists(weights):
-        raise SystemExit(f"{weights} missing: these diagnostics score the EMA shadow")
+        raise SystemExit(f"{weights} missing")
     generator.model.load_weights(weights)
     return generator, config
 
 
-def _iter_fakes(snapshots, total, seed, chunk=4):
+def _iter_fakes(snapshots, total, seed, chunk=4, weights_file="generator_ema.weights.h5"):
     """`total` EMA fakes spread evenly over the window's snapshots (a window-level set)."""
     import tensorflow as tf
     per = int(np.ceil(total / len(snapshots)))
     made = 0
     for n, (_, path) in enumerate(snapshots):
-        generator, config = _load_generator(path)
+        generator, config = _load_generator(path, weights_file)
         z = tf.random.Generator.from_seed(seed + n).normal([per, config.latent_dim])
         for start in range(0, per, chunk):
             if made >= total:
@@ -335,7 +335,10 @@ def cmd_critic(args):
         disc = Discriminator(dconf)
         disc.model.build((None, dconf.depth, *[int(v) for v in dconf.resolution], dconf.channels))
         disc.model.load_weights(os.path.join(path, "discriminator.weights.h5"))
-        fakes = np.concatenate(list(_iter_fakes([(step, path)], args.n, args.seed)))
+        # The critic trained against the RAW generator; scoring it on EMA fakes
+        # (smoother, better) confounds how well it separates real from fake.
+        fakes = np.concatenate(list(_iter_fakes([(step, path)], args.n, args.seed,
+                                                weights_file=args.fake_weights)))
         s_train = _critic_scores(disc, [train_imgs[i:i + 8] for i in range(0, len(train_imgs), 8)])
         s_held = _critic_scores(disc, [held_imgs[i:i + 8] for i in range(0, len(held_imgs), 8)])
         s_fake = _critic_scores(disc, [fakes[i:i + 8] for i in range(0, len(fakes), 8)])
@@ -437,6 +440,9 @@ def main():
     common(p)
     p.add_argument("--steps", default="10000-70000:10000,79000")
     p.add_argument("--n", type=int, default=100)
+    p.add_argument("--fake_weights", default="generator.weights.h5",
+                   help="Generator weights for the fakes the critic scores. Default: the raw "
+                        "weights the critic trained against (EMA fakes confound separation).")
     p.set_defaults(func=cmd_critic)
 
     p = sub.add_parser("spectrum", help="P0.4 power spectra, fakes vs reals")
