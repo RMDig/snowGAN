@@ -157,6 +157,33 @@ been uninterpretable if the critic was either overfitting or under-optimized.
 - **H5 supported** if r rises by > 0.3 from 10k and Spearman ρ(step) > 0.6.
 - Snapshots are every 10k up to 70k, then dense. That is coarse but sufficient for a trend.
 
+**Amendment A1 (2026-10-15, after smoke tests at small n, before any full diagnostic
+run).** The P0.2 and P0.3 statistics as first written broke on contact with real data:
+
+- **P0.2 ratio `R_s = KID_s(fake, held) / F_s`.** At crop scale, training and held-out
+  crops (mostly blue grid card) are nearly indistinguishable, so `F_crop ≈ 0` and the
+  ratio exploded (−1,294, −3,019). Replaced by **control-calibrated excess**:
+  - `D_s(X) = KID_s(held, X) − KID_s(held, train)`.
+  - `G = D_global128(fakes) / D_global128(tile shuffle)`, the layout deficit in units of
+    a known layout corruption.
+  - `T = D_crop(fakes) / D_crop(blur)`, the texture deficit in units of a known texture
+    corruption.
+  - Same thresholds on **G/T** (> 2 favours H1, < 0.5 favours H2/H3, CI excluding 1 at
+    both seeds). Leave-one-group-out jackknife with every term recomputed per fold.
+  - Controls must be selective first: tile shuffle < 0.5 in T units, blur < 0.5 in G
+    units.
+- **P0.3 ratio r.** At arm_d_ema 79k the critic scored fakes and training reals almost
+  equally (−48.7 vs −47.4), so r's denominator vanished (r = −21), and raw scores drift
+  2× between snapshots. Replaced by **AUC(train > held)**, the probability that the
+  critic scores a random training real above a random held-out real. It is scale-free and
+  has no denominator. **H5 supported if AUC grows by > 0.10 from the first snapshot and
+  Spearman ρ(step) > 0.6.**
+- **KID is blind to checkerboard.** A ±0.15 2-px checkerboard injected into held-out
+  reals moved KID by ≈ 0 at every scale, including native crops (−0.0006). **H3 can be
+  tested only by the spectrum (P0.4)**, and a G1 win cannot be expected to show up in
+  KID. G1's primary readout becomes the spectrum at the stride frequency, with KID
+  secondary.
+
 **P0.4 Spectrum (no training, ≈ 30 min).**
 - 2D log power spectra, fakes vs reals, at native 1024² **and** on the 299² tensors
   Inception sees.
