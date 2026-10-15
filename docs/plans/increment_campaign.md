@@ -125,6 +125,23 @@ window discards the trend that claim is about. Arm A: ρ = −0.95 converging; b
 Reporting both is mandatory, including when they disagree — a split verdict is a real
 result, not a thing to resolve by preference.
 
+**Amendment (2026-10-10, applies from the Arm D replicate onward): score at three seeds
+and include sample-set noise.** `kid_check.py --seed` fixes both the generated latents
+and the subset draws, so all 10 checkpoints of a window share one sample set. SE over
+checkpoints therefore omits the sample-set noise, a common offset of about ±0.012 (Arm D
+EMA window: 0.2415 / 0.2608 / 0.2639 at seeds 0 / 1 / 2). For a noisy run that term is
+swamped. For a low-spread run such as EMA (checkpoint SE 0.0014) it *is* the
+uncertainty, and leaving it out let Arm D pass the formula at seed 0 while sitting at
+1.9σ once it is included.
+
+From now on each window is scored at seeds 0, 1 and 2:
+
+- `KID_mean` = mean over the 3 seeds of the 10-checkpoint window means.
+- `SE² = SE_ckpt² + σ_seed² / 3`, where `SE_ckpt` is the mean over seeds of the
+  checkpoint SE and `σ_seed` is the std (ddof 1) of the three window means. Checkpoint
+  noise does not average down across seeds (same checkpoints); sample-set noise does.
+- Criterion 1 is then applied unchanged with these SEs.
+
 ### The freezing control (mandatory from Arm A onward)
 
 Any arm that reduces KID variance must report **relative generator weight movement per
@@ -250,6 +267,26 @@ EMA-vs-raw difference isolates averaging from run-to-run noise.
 **If false:** the window ties and std does not fall. Then the spread does not come from
 the weights wobbling fast around a good point; it comes from slower drift, which
 averaging over ~1k steps cannot remove.
+
+---
+
+### Horizon run — EMA to 160k (pre-registered 2026-10-12, before launch)
+
+**Question:** where does the EMA model level off? At seed 43 it was still improving at 80k
+(window ρ −0.87, best at the final step).
+
+**Design:** resume `arm_d_ema_s43` then `arm_d_ema` from 80k to 160k, same recipe. Flat
+LR, so resuming continues the same trajectory, and the EMA shadow reloads from
+`generator_ema.weights.h5`. `--cleanup_milestone 0` so the scored 70–79k windows
+survive. This is within-run only: no baseline extends past 100k, so the run cannot say
+whether EMA's *advantage* grows. It can only say whether training longer helps an EMA
+model.
+
+**Measure:** EMA window KID at 150–159k vs the same run's 70–79k, under the §2 amendment
+(seeds 0/1/2). **Longer training helps** at a seed if the 150–159k window is lower by the
+§2 formula. **It has levelled off** if the windows tie, and the plateau step is then read
+off the in-training KID curve (first 10k window whose mean is within 2 × SE of the final
+window's). Verdict per seed, both reported.
 
 ---
 
