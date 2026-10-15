@@ -315,6 +315,11 @@ class DataManager:
             return False
         return (meta.get("site"), meta.get("column"), meta.get("core")) in self.held_out_keys
 
+    def _is_excluded(self, meta):
+        """True when this row's site is in config.exclude_sites (training stream only)."""
+        excluded = getattr(self.config, "exclude_sites", None)
+        return bool(excluded) and meta.get("site") in set(excluded)
+
     def _get_manifest_entry(self, index):
         if index < 0 or index >= len(self.manifest):
             return None
@@ -412,7 +417,7 @@ class DataManager:
 
             print(f"Checking sample at index {self.config.train_ind} - {sample_datatype} - {datatype}")
 
-            if sample_datatype == datatype and not self._is_held_out(meta):
+            if sample_datatype == datatype and not self._is_held_out(meta) and not self._is_excluded(meta):
                 image = self.load_image(self.config.train_ind, meta)
                 if image is None:
                     self.config.train_ind += 1
@@ -472,7 +477,7 @@ class DataManager:
             print(f"Checking sample at index {self.config.train_ind} - {sample_datatype}")
 
             # If we've found a core sample in a group we're allowed to train on
-            if sample_datatype == 0 and not self._is_held_out(meta):
+            if sample_datatype == 0 and not self._is_held_out(meta) and not self._is_excluded(meta):
 
                 # NB: no `self.dataset['train'][...]` here. Materializing an HF
                 # row decodes every column including the URL-backed `image`, so

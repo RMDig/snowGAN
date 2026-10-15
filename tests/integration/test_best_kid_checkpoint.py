@@ -22,7 +22,7 @@ import snowgan.kid as kid_module
 from test_diffaugment_generator_step import RES, _make_trainer
 
 
-def _stub_features(images, batch_size=8, model=None):
+def _stub_features(images, batch_size=8, model=None, antialias=False):
     # Per-image channel means: deterministic in the images, no RNG.
     arr = np.asarray(images, dtype=np.float64)
     return arr.reshape(arr.shape[0], -1, arr.shape[-1]).mean(axis=1)

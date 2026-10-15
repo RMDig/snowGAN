@@ -150,7 +150,7 @@ def select_rows(frame, wanted, held=None, sites=None):
     return rows
 
 
-def real_features(config, image_root, limit, inception, sites=None, seed=0, chunk=32):
+def real_features(config, image_root, limit, inception, sites=None, seed=0, chunk=32, antialias=False):
     """Inception features of the real set, plus the group key per image.
 
     Shared by ``scripts/kid_check.py`` and the trainer's best-KID checkpointing,
@@ -207,11 +207,12 @@ def real_features(config, image_root, limit, inception, sites=None, seed=0, chun
                 arr = np.asarray(handle.convert("RGB").resize((width, height), Image.BILINEAR),
                                  dtype=np.float32)
             images.append(arr / 127.5 - 1.0)
-        features.append(inception_features(np.stack(images)[:, None, ...], model=inception))
+        features.append(inception_features(np.stack(images)[:, None, ...], model=inception,
+                                           antialias=antialias))
     return np.concatenate(features, axis=0), keys
 
 
-def inception_features(images, batch_size=8, model=None):
+def inception_features(images, batch_size=8, model=None, antialias=False):
     """InceptionV3 pool3 features (2048-d) for a batch of images in [-1, 1].
 
     Accepts rank-4 ``(N, H, W, C)`` or rank-5 ``(N, D, H, W, C)``; the depth
@@ -232,7 +233,10 @@ def inception_features(images, batch_size=8, model=None):
             if len(chunk.shape) == 5:
                 shape = tf.shape(chunk)
                 chunk = tf.reshape(chunk, [shape[0] * shape[1], shape[2], shape[3], shape[4]])
-            chunk = tf.image.resize(chunk, (299, 299))
+            # antialias=False is the historical KID: a 1024->299 bilinear
+            # resize without a low-pass filter, which aliases fine texture
+            # (e.g. a 2-px checkerboard) into what Inception sees.
+            chunk = tf.image.resize(chunk, (299, 299), antialias=antialias)
             chunk = preprocess_input((chunk + 1.0) * 127.5)
             out.append(model(chunk, training=False).numpy())
     finally:
