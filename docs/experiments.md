@@ -113,6 +113,37 @@ Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pend
 | **1z-B** | 09-23 | 1z-A | **only change: `--spectral_norm --disc_lambda_gp 1.0`** (the collapsed runs' recipe) | same | nn_dist **0.570 → 0.292**; diversity **0.372**; ‖dD/dx‖ settles **0.35–0.42** (over-smoothed) with λ·GP stuck at 0.33–0.47 | ✅ fits — hypothesis **not** confirmed at this scale; mechanism corrected (see above) |
 | **0** | 09-23 | HEAD + Phase 0 | **control: does current code train the structure-era recipe from scratch?** disc 2 : gen 3, λ_gp 10, **no SN**, no clip, no decay, no EMA, no ADA, no multiscale, seed 42 | magnified_profile **512**, 10,000 steps = 20,000 critic updates, 133 min on RTX 5080 | **‖dD/dx‖ 1.046 (real) / 1.030 (interp) / 1.081 (fake)**; \|W\| 1.0 vs 1774 ceiling; λ·GP 25.4% of loss; **latent diversity 0.609** (released model 0.490, dead runs 0.00003); std 0.583; saturated 3.35%; samples show the crystal-mesh motif, two latents visibly different | **✅ PASSES** |
 
+**EMA horizon run, 80k → 160k (2026-10-15): levelled off by 50–60k at both seeds.**
+Both Arm D runs resumed from 80k to 160k with the same recipe (pre-registered in
+increment_campaign §4). Seed 43 ran to completion; seed 42 was interrupted by a power
+outage at 114,146. Its 114,100 checkpoint was intact (all weights finite, configs and
+`kid.json` parse), and it resumed with the EMA shadow reloaded, losing 46 steps. Commit
+4b90eed throughout. Scored on the EMA shadow at seeds 0/1/2 (§2 amendment). Windows
+matched on `fade_step` offsets as before (s42 150,100–159,100; s43 150,800–159,800).
+
+| seed | 70–79k window | 150–159k window | Δ (late − early) | 2 × SE | |t| | verdict |
+|---|---|---|---|---|---|---|
+| 42 | 0.2554 ± 0.0071 | 0.2524 ± 0.0056 | −0.003 | 0.018 | 0.33 | **tie** |
+| 43 | 0.2567 ± 0.0104 | 0.2375 ± 0.0044 | −0.019 | 0.023 | 1.70 | **tie** |
+
+In-training EMA KID by 10k window (start step : mean):
+
+- s42: 20:0.388 · 30:0.357 · 40:0.280 · 50:0.241 · 60:0.269 · 70:0.252 · 80:0.264 · 90:0.249 · 100:0.247 · 110:0.236 · 120:0.226 · 130:0.244 · 140:0.243 · 150:0.249
+- s43: 20:0.365 · 30:0.354 · 40:0.323 · 50:0.278 · 60:0.266 · 70:0.264 · 80:0.269 · 90:0.269 · 100:0.272 · 110:0.293 · 120:0.293 · 130:0.288 · 140:0.258 · 150:0.251
+
+Plateau (first window within 2 × SE of the final one): **50k at s42, 60k at s43.** Best
+in-training checkpoints: s42 57k (0.215), s43 79k (0.222). Neither was beaten in the
+extra 80k steps.
+
+**Reading.** Doubling training bought nothing resolvable. Seed 43's −0.019 points the
+same way as its 80k trend but is 1.7σ. Between 60k and 160k the EMA model wanders inside
+a band of about ±0.02 rather than improving. With this, the original hypothesis — that
+the model needs slower learning over very long stretches — has now been tested along
+both axes: a slower learning rate (Arm A, unreplicated) and a longer horizon (this run,
+a tie). Neither is the lever. At this architecture and data, the recipe plateaus at an
+EMA KID of about 0.24–0.25 by 50–60k steps. Further gains have to come from the model or
+the data, not from more or slower training.
+
 **Arm D replicate at seed 43 (2026-10-11): REPLICATED. EMA beats the same-seed
 baseline at |t| = 3.0.** `arm_d_ema_s43`: Arm D's recipe at `SEED=43` (same split and same
 609 reals as `noise_seed43`), 80k steps, 28 h, one RSS restart, commit 4b90eed. Scored
