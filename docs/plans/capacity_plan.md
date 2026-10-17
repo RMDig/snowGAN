@@ -294,6 +294,38 @@ will be read from E0 vs arm_d_ema after their first restarts.
 per-scale R_s (descriptive only, since it chose the arm), ‖∇D‖, diversity, memorization
 ratio, P0.3's r.
 
+### Phase 1 results
+
+**E0 (2026-10-16): restart-induced spread.**
+- E0 (commit 5bb2af9) and arm_d_ema have bit-identical training logs until both RSS
+  restarts at step ~50,700. They diverge from 50,702.
+- At ~60k (arm_d_ema `batch_60000` = step 60,702; E0 final = 60,000), anti-aliased KID
+  at seeds 0/1/2 with n_gen 500: arm_d_ema 0.2736 / 0.2676 / 0.2763, E0 0.2378 / 0.2356
+  / 0.2403. **|Δ| = 0.035, consistent across seeds** (±0.003 each).
+- This is **one single-checkpoint comparison**. It overstates the noise of a 20-point
+  window mean, so the window-level σ_run remains unmeasured. The pre-registered reset
+  ("|E0 − arm_d_ema| / √2 combined with σ_plateau") gives σ_run ≈ 0.028 and a bar of
+  ≈ 0.08. Until a better estimate exists, verdicts are reported under all three
+  candidate bars (0.039 / 0.071 / 0.080), and any arm landing between them is flagged
+  as unresolved rather than decided by choosing a bar.
+
+**O1, disc_lr 3e-5 (2026-10-17): critic now wins; KID tie.**
+- `cap_o1`, commit d6451c1, paused at 14,300 for a system upgrade and resumed (counted
+  as a restart).
+- **Primary:** paired in-training KID vs E0 over 40–59k: O1 0.2537, E0 0.2525, **Δ
+  +0.001 ± 0.006** (block bootstrap), O1 lower at 8/20. **Tie under every bar.**
+- **Mechanics:** the critic now ranks reals above fakes 62–71% of steps after 10k (E0
+  40–47%), and its Wasserstein term turns negative (−19 → −86). That is the Phase 0
+  defect, fixed.
+- **But it escapes the gradient penalty:** ‖∇D‖ climbs steadily, 1.79 → 2.97, against a
+  target of 1 (E0 0.96 → 1.41).
+- Best in-training (≥ 20k): O1 0.234 @ 25k, E0 0.226 @ 55k.
+- **Reading:** making the critic win by speeding it up does not improve the generator.
+  The faster critic is also less Lipschitz-constrained, so this does not rule out a
+  *better-trained* critic helping (O2 tests that at the original LR).
+- Three-seed confirmation of the 50–59k window is running (O1 batch names = steps
+  50,300–59,300; E0 50,000–59,701).
+
 ## 5. Decision rule (pre-registered; replaces increment_campaign §2 for this campaign)
 
 1. **Primary statistic: paired in-training EMA KID** against E0, step-matched over
