@@ -81,7 +81,14 @@ def _real_features(config, image_root, limit, inception, sites=None, seed=0, chu
         raise SystemExit(str(exc))
 
 
-def _generate(checkpoint_dir, config_overrides, count, seed, weights_file="generator.weights.h5", batch=4):
+def _generate(checkpoint_dir, config_overrides, count, seed, weights_file="generator.weights.h5", batch=4,
+              featurize=None):
+    """Generate `count` images, or with `featurize`, their features chunk by chunk.
+
+    Holding the images costs count x 12.6 MB at 1024^2 float32, doubled by the
+    final concatenate: ~25 GB at --n_gen 1000. That ran WSL (31 GB) out of
+    memory and took the concurrent cap_o2 training run down with it three times.
+    """
     import tensorflow as tf
     from snowgan.config import build
     from snowgan.models.generator import Generator
@@ -110,7 +117,8 @@ def _generate(checkpoint_dir, config_overrides, count, seed, weights_file="gener
     z = tf.random.normal([count, config.latent_dim])
     out = []
     for start in range(0, count, batch):       # chunked: 1024^2 wide forwards OOM
-        out.append(generator.model(z[start:start + batch], training=False).numpy())
+        chunk = generator.model(z[start:start + batch], training=False).numpy()
+        out.append(featurize(chunk) if featurize is not None else chunk)
     del generator
     tf.keras.backend.clear_session()
     return np.concatenate(out, axis=0), config
@@ -210,10 +218,12 @@ def main():
     rows = []
     print(f"\n{'step':>9} {'KID':>10} {'+/- SE':>9} {'subsets':>8}")
     for step, path in _checkpoints(run_dir, args.sweep):
-        fakes, _ = _generate(path, overrides, args.n_gen, args.seed, weights_file=args.weights_file)
-        if fakes is None:
+        # Featurised per generated chunk, never holding the images (see _generate).
+        fake_features, _ = _generate(
+            path, overrides, args.n_gen, args.seed, weights_file=args.weights_file,
+            featurize=lambda chunk: inception_features(chunk, model=inception, antialias=args.antialias))
+        if fake_features is None:
             continue
-        fake_features = inception_features(fakes, model=inception, antialias=args.antialias)
         score = kid_score(real_features, fake_features,
                           subsets=args.subsets, subset_size=args.subset_size,
                           seed=args.seed)
