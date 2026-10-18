@@ -30,6 +30,24 @@ class _CountingData:
         return rng.uniform(-1, 1, (batch_size, 1, RES, RES, 3)).astype("float32")
 
 
+class _ShortTailData(_CountingData):
+    """First fetch returns a short tail batch, as at the end of a manifest pass."""
+
+    def next_batch(self, batch_size):
+        batch = super().next_batch(batch_size)
+        return batch[:batch_size - 1] if self.calls == 1 else batch
+
+
+def test_a_short_tail_batch_is_not_used(tmp_path, monkeypatch):
+    """cap_o2 crashed at step 250: a 3-image tail batch met 4 fakes in the GP."""
+    t = _make_trainer(tmp_path, monkeypatch, augment=False)
+    t._disc_steps = 2
+    t.dataset = _ShortTailData()
+    t.fresh_critic_batches = True
+    t.train_step(tf.random.normal([2, 1, RES, RES, 3]))  # must not raise
+    assert t.dataset.calls == 2, "the short batch should be discarded and a full one fetched"
+
+
 def _critic_real_inputs(trainer, monkeypatch, images):
     seen = _record_critic_inputs(trainer, monkeypatch)
     trainer.train_step(images)

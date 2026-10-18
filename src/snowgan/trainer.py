@@ -1070,13 +1070,19 @@ class Trainer:
             # historical stream (every critic step reuses one batch and one
             # noise draw) bit-identical, RNG included.
             if self.fresh_critic_batches and critic_step > 0:
-                fresh = self.dataset.next_batch(int(batch_size))
-                if fresh is None:  # manifest exhausted: wrap, as train() does
+                want = int(batch_size)
+                fresh = self.dataset.next_batch(want)
+                # Manifest exhausted, or a short tail batch: wrap, as train()
+                # does. A short batch must not be used, because the fakes are
+                # generated at `want` and the gradient penalty interpolates
+                # real against fake element-wise (cap_o2 crashed on a
+                # short-vs-4 broadcast at step 250).
+                if fresh is None or len(fresh) != want:
                     self.gen.config.train_ind = 0
-                    fresh = self.dataset.next_batch(int(batch_size))
-                if fresh is not None:
+                    fresh = self.dataset.next_batch(want)
+                if fresh is not None and len(fresh) == want:
                     images = tf.convert_to_tensor(fresh, dtype=images.dtype)
-                noise = tf.random.normal([batch_size, self.gen.config.latent_dim])
+                noise = tf.random.normal([tf.shape(images)[0], self.gen.config.latent_dim])
             # Generate synthetic images outside the tape — no need to track generator ops for disc training
             synthetic_images = tf.stop_gradient(self._generate_with_fade(noise, training=True))
 
