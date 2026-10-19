@@ -326,6 +326,41 @@ ratio, P0.3's r.
 - Three-seed confirmation of the 50–59k window is running (O1 batch names = steps
   50,300–59,300; E0 50,000–59,701).
 
+**O2, fresh critic batches (2026-10-19): worse in the window, better before it.**
+- `cap_o2`, commit 14ed99a; earlier attempts are kept as `cap_o2_crashed_step250`
+  (short-batch bug, fixed 06ea60e) and `cap_o2_killed_*` (WSL OOM caused by a
+  concurrent `kid_check --n_gen 1000`, fixed 14ed99a).
+- **Primary:** paired in-training KID vs E0 over 40–59k: O2 0.3576, E0 0.2525, **Δ
+  +0.105 ± 0.011**, worse at 20/20. Distinguishable (worse) under every bar.
+- **The curve does not fit a single verdict.** O2 − E0, every 3k: 3k +0.17 · 9k −0.08
+  · 15k −0.11 · 21k −0.10 · 27k −0.03 · 33k −0.05 · 36k +0.05 · 45k +0.11 · 54k
+  +0.15 · 60k +0.11. O2 was **better by up to 0.11 through 9–33k**, then crossed over
+  and degraded.
+- **Mechanics:** the critic still loses (real > fake 0.40–0.44, like E0), and ‖∇D‖
+  matches E0.
+
+**Unplanned finding (2026-10-19): the training stream is never shuffled.**
+`DataManager.batch()` reads the manifest in order, and the manifest is grouped by
+(site, column, core). The seed-42 training pool is **36 contiguous runs**, so **94% of
+4-image batches are a single core**, and each pass (~500 steps) sweeps the cores in a
+fixed cycle: 33 steps of site 0 only, then 20 steps of core (1,1,2), 48 of (1,1,3), and
+so on.
+- This plausibly explains the checkpoint-to-checkpoint wobble that dominated Arms A–D.
+  The model is dragged around a ~500-step data cycle, and EMA's ~1k-step average spans
+  about two cycles, which may be why EMA worked.
+- It also plausibly explains the losing critic: four near-identical reals per batch
+  against fakes from the whole distribution.
+- And it complicates O2, whose "fresh" critic batch is the *next four images of the
+  same core* and which runs the cycle twice as fast.
+- The v0.1.0 release trained this way too.
+- **Fix:** `--shuffle_data` (off by default). It serves a fresh permutation per pass,
+  drawn from (seed, data_pass), and data_pass is persisted, so resumes reproduce the
+  stream. The single-modality path only.
+- **C1 was stopped at ~1 h** (`cap_c1`, not analysed): testing augmentation on an
+  unshuffled stream would have wasted a day.
+- **New arm S1** (E0 + `--shuffle_data`), run next. Every arm decided so far (O1, O2)
+  was tested on the unshuffled stream, and their verdicts are conditional on it.
+
 ## 5. Decision rule (pre-registered; replaces increment_campaign §2 for this campaign)
 
 1. **Primary statistic: paired in-training EMA KID** against E0, step-matched over
