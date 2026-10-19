@@ -323,8 +323,11 @@ ratio, P0.3's r.
 - **Reading:** making the critic win by speeding it up does not improve the generator.
   The faster critic is also less Lipschitz-constrained, so this does not rule out a
   *better-trained* critic helping (O2 tests that at the original LR).
-- Three-seed confirmation of the 50–59k window is running (O1 batch names = steps
-  50,300–59,300; E0 50,000–59,701).
+- **Three-seed confirmation** (50–59k window; n_gen 1000, subsets 50, antialiased;
+  O1 steps 50,300–59,300, E0 50,000–59,701): O1 **0.2591 ± 0.0026** (0.2589 / 0.2608 /
+  0.2576), E0 **0.2516 ± 0.0028** (0.2534 / 0.2517 / 0.2495). Δ +0.008. That equals 2 ×
+  SE_window (0.008) only before σ_run is added, so it is a **tie**, consistent with the
+  primary.
 
 **O2, fresh critic batches (2026-10-19): worse in the window, better before it.**
 - `cap_o2`, commit 14ed99a; earlier attempts are kept as `cap_o2_crashed_step250`
