@@ -364,6 +364,35 @@ so on.
 - **New arm S1** (E0 + `--shuffle_data`), run next. Every arm decided so far (O1, O2)
   was tested on the unshuffled stream, and their verdicts are conditional on it.
 
+**S1, shuffled stream (2026-10-20): unresolved, leaning worse. The shuffling
+hypothesis is not supported.**
+- `cap_s1`, commit 9f08f58. One restart at 50,702, the same point as E0. data_pass
+  reached 119, about 505 steps per pass, so it was persisted correctly across the
+  restart.
+- **Primary:** paired in-training KID vs E0 over 40–59k: S1 0.2945, E0 0.2525, **Δ
+  +0.042 ± 0.007**, S1 lower at 2/20. Distinguishable under the 0.039 bar, a tie under
+  0.071 / 0.080. That is the **unresolved zone flagged in advance, recorded as
+  unresolved (leaning worse)**, not decided by choosing a bar.
+- **Same shape as O2:** S1 − E0 every 3k: 6k −0.03 · 12k −0.06 · 15k −0.11 · 18k −0.07 ·
+  21k −0.04 · 24k +0.04 · 30k +0.05 · 39k +0.07 · 54k +0.06 · 60k +0.07. Better early,
+  worse from ~24k.
+- **No less wobble:** 10k-window KID SD: S1 0.021 / 0.022 / 0.032 / 0.012 vs E0 0.033 /
+  0.023 / 0.020 / 0.013. EMA was already absorbing the data cycle.
+- **Critic:** S1's starts winning after 30k (W → −8.5, real > fake 0.43–0.48), and
+  ‖∇D‖ rises to 1.90 against E0's 1.41.
+- Best in-training (≥ 20k): S1 0.250 @ 46k, E0 0.226 @ 55k.
+
+**Correction to the 2026-10-19 note.** The unshuffled stream is still a real defect
+(shuffling is the correct way to feed a GAN). But the claims that it "plausibly
+explains" the wobble and the losing critic are **not supported**: shuffling neither
+reduced the window spread nor improved KID.
+
+**Pattern across O2 and S1.** Both changes give the critic better information. Both
+speed up early learning (better by up to 0.11 through ~9–33k), then degrade after
+~25–35k while the critic starts to win and ‖∇D‖ climbs. This points at **late-training
+instability when the critic gets stronger**, which is what DiffAugment is designed to
+counter. C1 runs next on the unshuffled base (comparable to E0).
+
 ## 5. Decision rule (pre-registered; replaces increment_campaign §2 for this campaign)
 
 1. **Primary statistic: paired in-training EMA KID** against E0, step-matched over
