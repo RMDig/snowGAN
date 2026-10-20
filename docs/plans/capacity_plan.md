@@ -393,6 +393,54 @@ speed up early learning (better by up to 0.11 through ~9–33k), then degrade af
 instability when the critic gets stronger**, which is what DiffAugment is designed to
 counter. C1 runs next on the unshuffled base (comparable to E0).
 
+### Amendment A2 (2026-10-20): pre-registered secondary readout at 20–39k
+
+**Why.** The primary window (40–59k) measures where a run ends up. Three arms have now
+shown the same shape, faster early and caught (or overtaken) by E0 late, which the
+primary window cannot see. Post hoc (these values were computed after the data was
+seen, so they are descriptive only):
+
+| arm | 20–39k Δ vs E0 | arm lower | 40–59k Δ (primary) |
+|---|---|---|---|
+| O1, critic LR 3× | **−0.081 ± 0.009** | 20/20 | +0.001 (tie) |
+| O2, fresh critic batches | −0.039 ± 0.016 | 16/20 | +0.105 (worse) |
+| S1, shuffled stream | +0.019 ± 0.006 | 4/20 | +0.042 (unresolved) |
+
+S1's early advantage sat at 6–21k, before this window.
+
+**Rule, pre-registered for C1 and every later arm.** C1 was at step 8,000 when this was
+written, so it has no data in the window yet.
+- **Secondary statistic:** the same paired in-training KID against E0, step-matched
+  over **20–39k** (20 points), block-bootstrap SE, same three bars as the primary.
+- **It never replaces the primary.** Adoption still requires the primary (40–59k), the
+  three-seed confirmation and a seed-43 replicate.
+- **What it decides:** an arm that is distinguishable *better* in 20–39k but not in
+  40–59k is recorded as **"faster, same endpoint"**. That is a compute/early-stopping
+  result, not a quality result. An arm better early and worse late (the O2 shape) is
+  recorded as **"faster, then degrades"** and flags late-training instability.
+- **Reported for every arm, in both windows, every time.**
+
+### Status and remaining schedule (2026-10-20)
+
+- **Spent:** about 3.5 GPU-days productive (E0, O1, O2, S1, diagnostics) plus about 1
+  day lost to failures (the O2 short-batch crash, three OOM kills from a concurrent
+  `kid_check`, and idle time). About 6–8 of the 10–12 approved GPU-days remain.
+- **Results so far:** nothing beats E0 on the primary. O1 tie; O2 worse; S1
+  unresolved/worse; C1 running.
+- **Ruled out:** training too fast or too short (anneal, 160k horizon, critic LR);
+  critic memorization; checkerboard; unshuffled data as the hidden cause.
+- **Unresolved:** H1 vs H2 (P0.2 G/T ≈ 0.9 at both seeds); window-level σ_run (the
+  0.04–0.08 unresolved zone).
+- **Schedule:**
+  1. **C1** (DiffAugment) finishes Wed 21 Oct ~09:00.
+  2. **D1** (`--exclude_sites 0`) to Thu 22 Oct. Last Tier A arm.
+  3. **Tier B**, one arm per unresolved hypothesis, code written while C1/D1 run:
+     **K1** (nonlinear critic head, H1) and **G2** (zero-init residual conv per
+     resolution, H2). Each 22–33 h.
+  4. **A seed-43 E0 plus a replicate for any winner** before adoption, ~2 days. None is
+     needed so far.
+  5. Expected end around Oct 29–30.
+
 ## 5. Decision rule (pre-registered; replaces increment_campaign §2 for this campaign)
 
 1. **Primary statistic: paired in-training EMA KID** against E0, step-matched over
