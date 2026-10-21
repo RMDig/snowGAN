@@ -393,6 +393,32 @@ speed up early learning (better by up to 0.11 through ~9–33k), then degrade af
 instability when the critic gets stronger**, which is what DiffAugment is designed to
 counter. C1 runs next on the unshuffled base (comparable to E0).
 
+**C1, DiffAugment (2026-10-21): slower, not yet settled. Extended to 80k by the
+plateau guard.**
+- `cap_c1`, commit 1e33a28. The policy is flip, brightness, saturation and cutout at a
+  fixed p 0.5 (ADA off), applied in both the critic and generator steps.
+- **12 RSS restarts** (one every ~4,930 steps, against one per run for the other arms):
+  DiffAugment leaks CPU memory much faster. The restarts are resume-safe, but they make
+  C1's trajectory noisier.
+- **Primary (40–59k):** C1 0.3158, E0 0.2525, **Δ +0.063 ± 0.004**, C1 lower at 0/20.
+  Unresolved zone (0.038 → distinguishable, 0.071 / 0.080 → tie), leaning clearly worse.
+- **Secondary A2 (20–39k, pre-registered):** Δ +0.024 ± 0.008, lower at 6/20. **Tie.**
+  Not faster early: C1 trails E0 almost throughout.
+- **Critic mechanics are essentially E0's** (real > fake 0.45–0.48; ‖∇D‖ 1.25–1.38 vs
+  1.05–1.41). Augmentation did not visibly change the critic's dynamics.
+- **Still improving at 60k:** 10k-window means 0.393 → 0.387 → 0.345 → 0.331 → 0.300,
+  with ρ(step, KID) −0.80 over 40–60k. It lags E0 by ~10–15k steps, which fits the
+  slower convergence reported for augmented GANs. The last window moved 0.031 > 2 ×
+  σ_plateau (0.026), so **§5 rule 7 (the plateau guard) applies: extend to 80k before
+  calling it.**
+- **Extension readout (pre-registered here, before the extension runs):** C1's 60–79k
+  in-training EMA KID against **E0's 40–59k plateau** (0.2525). E0 stops at 60k, and
+  the same recipe (arm_d_ema) showed no improvement past ~60k (horizon run). This is
+  unpaired, so SE = hypot(block SE of C1's window, block SE of E0's window), with the
+  same three σ_run bars. If C1 then sits below E0's plateau by the formula, DiffAugment
+  is "slower, better endpoint" and gets a seed-43 replicate. A tie is recorded as
+  "slower, same endpoint"; worse is worse. Starts automatically after D1.
+
 ### Amendment A2 (2026-10-20): pre-registered secondary readout at 20–39k
 
 **Why.** The primary window (40–59k) measures where a run ends up. Three arms have now
