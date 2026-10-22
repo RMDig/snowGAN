@@ -419,6 +419,39 @@ plateau guard.**
   is "slower, better endpoint" and gets a seed-43 replicate. A tie is recorded as
   "slower, same endpoint"; worse is worse. Starts automatically after D1.
 
+**D1, drop site 0 (2026-10-22): unresolved, leaning worse.**
+- `cap_d1`, commit b55b603; one restart.
+- **Primary (40–59k):** D1 0.3210, E0 0.2525, **Δ +0.068 ± 0.015**, lower at 0/20.
+  Distinguishable at 0.048, a tie at 0.076 / 0.085: unresolved, leaning worse.
+- **Secondary A2 (20–39k):** Δ −0.010 ± 0.014, lower at 12/20. Tie.
+- Critic mechanics match E0's. Best in-training D1 0.247 @ 58k, E0 0.226 @ 55k.
+
+### E0b: a same-split replicate of the reference (pre-registered 2026-10-22)
+
+**Why.** Every arm is level with or worse than E0 in 40–59k (O1 +0.001, S1 +0.042, C1
++0.063, D1 +0.068, O2 +0.105), while in 20–39k they scatter around it (−0.081 …
++0.024). E0 itself falls sharply between its 30k and 40k windows (0.332 → 0.266), and
+no arm shows that drop. That pattern is what a **reference with an unusually good
+40–59k** would produce. With one reference run and no window-level σ_run, it cannot be
+told apart from "every change slightly hurts".
+
+**Design.** E0's exact recipe and commit lineage plus **`--init_seed 1042`** (new: it
+re-seeds weight init and training-time noise only). The split and the in-training KID
+latents stay on `seed` 42, so E0b and E0 are scored on identical reals and latents.
+`cap_e0b`, 60k steps.
+
+**Readouts (fixed now, before E0b runs):**
+1. Paired in-training KID, E0b − E0, over 20–39k and 40–59k (block-bootstrap SE).
+2. **Window-level σ_run** ≔ max over the two windows of |Δ(E0b − E0)| / √2. This is
+   conservative and has one degree of freedom, and is reported as such. It replaces the
+   three candidate bars for every arm, so S1, C1 (60k and 80k) and D1 are re-read under
+   it, and so is Tier B.
+3. **If E0b sits above E0 by more than 0.04 in 40–59k**, E0 was a lucky reference.
+   From then on the reference is the step-wise mean of E0 and E0b, every arm is
+   re-read against it, and the re-reading is reported next to the original.
+4. **If E0b ≈ E0** (|Δ| < 0.02 in both windows), the arms really are worse, and the
+   campaign proceeds to Tier B on the E0 reference.
+
 ### Amendment A2 (2026-10-20): pre-registered secondary readout at 20–39k
 
 **Why.** The primary window (40–59k) measures where a run ends up. Three arms have now

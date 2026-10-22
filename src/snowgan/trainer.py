@@ -830,6 +830,7 @@ class Trainer:
             honor_splits=bool(getattr(self.gen.config, "honor_splits", True)),
             max_steps=int(self.max_steps),
             seed=int(getattr(self.gen.config, "seed", 42)),
+            init_seed=getattr(self.gen.config, "init_seed", None),
         )
 
         start_epoch = int(getattr(self.gen.config, "current_epoch", 0) or 0)

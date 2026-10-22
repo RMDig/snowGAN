@@ -7,7 +7,7 @@ from snowgan.models.generator import load_generator
 from snowgan.models.discriminator import load_discriminator
 from snowgan.config import configure_disc, configure_gen, build
 from snowgan.checkpoint import resolve_weights_path
-from snowgan.utils import parse_args, configure_device, set_seed
+from snowgan.utils import parse_args, configure_device, set_seed, training_seed
 
 
 _INFER_MOVED_MESSAGE = (
@@ -51,8 +51,8 @@ def main():
     # Seed RNGs before any model construction so weight init, noise
     # sampling, and dataset shuffling are reproducible across runs with
     # matching configs (UPGRADES #12).
-    set_seed(gen_config.seed)
-    print(f"Seed set to {gen_config.seed}")
+    set_seed(training_seed(gen_config))
+    print(f"Seed set to {training_seed(gen_config)} (split/KID seed {gen_config.seed})")
 
     # Load the generator when training or generating samples
     generator = load_generator(gen_config.checkpoint, gen_config)

@@ -9,6 +9,20 @@ from pathlib import Path
 from snowgan.config import build as configuration
 
 
+def training_seed(config) -> int:
+    """Seed for weight init and training-time randomness.
+
+    `config.seed` also fixes the train/validation/test split (derive_splits)
+    and the in-training KID latents (seed + 2), so changing it changes the
+    data a run trains and is scored on. `config.init_seed`, when set, replaces
+    it for the global RNGs only: a same-split replicate with independent
+    initialization and noise. That is what measuring run-to-run variance at a
+    fixed split needs (capacity_plan, E0b).
+    """
+    init_seed = getattr(config, "init_seed", None)
+    return int(init_seed) if init_seed is not None else int(config.seed)
+
+
 def set_seed(seed: int) -> None:
     """Pin RNG state across Python, NumPy, and TensorFlow for reproducibility.
 
@@ -135,6 +149,7 @@ def parse_args():
     # configure()'s int() cast, so a float here reached keras.Input(shape=(100.0,))
     # and crashed model build (UPGRADES #7).
     parser.add_argument('--latent_dim', type = int, default = None, help = 'Latent dimension size (Defaults to 100)')
+    parser.add_argument('--init_seed', type=int, default=None, help='Seed for weight init and training-time randomness only. The split and the in-training KID latents stay on --seed, so a different --init_seed is a same-split replicate (default: use --seed).')
     parser.add_argument('--seed', type = int, default = None, help = 'RNG seed for weight init, noise sampling and split derivation. Persisted to the config so a resume replays the same stream (defaults to 42).')
     parser.add_argument('--max_steps', type = int, default = None, help = 'Hard stop after N train steps (global_step). 0 = no cap. Use this to make a gated control run terminate at a defined point rather than relying on a manual kill.')
     parser.add_argument('--cleanup_milestone', type = int, default = 1000, help = 'Frequency (in batches) to save checkpoints and cleanup older batches (Defaults to 1000)')
