@@ -452,6 +452,24 @@ latents stay on `seed` 42, so E0b and E0 are scored on identical reals and laten
 4. **If E0b ≈ E0** (|Δ| < 0.02 in both windows), the arms really are worse, and the
    campaign proceeds to Tier B on the E0 reference.
 
+### Tier B implementation (2026-10-22, branch `feat/tier-b`)
+
+Both switches are off by default, and the defaults build the historical models (tested).
+
+- **K1, `--disc_head mlp`** (H1, cross-patch structure): `Conv3D(64, 1×1)` + LReLU →
+  `Flatten(name="features")` → `Dense(128)` + LReLU → `Dense(1)`. The score becomes a
+  nonlinear function of the whole 32×32 patch grid. **Confounds, reported with the
+  result:** the critic goes from 7.32M to 14.73M params, and `features` shrinks from
+  1,048,576 to 65,536 values, so a K1 critic is not a drop-in AvAI backbone.
+- **G2, `--gen_residual_blocks 1`** (H2, depth): after each upsampling stage, `x +
+  Conv(LReLU(Conv(x)))`, with the second conv zero-initialised. At step 0 the network
+  computes exactly the base function (tested: perturbing the first conv leaves the
+  output unchanged), and the zero-initialised convs move after one step (tested).
+  **Confound:** the generator goes from 41.92M to 67.07M params.
+- **Before each launch:** a short GPU smoke for step time and peak VRAM, since neither
+  has run at 1024² yet. Run order: after E0b, K1 then G2. E0b decides which reference
+  and σ_run they are read against.
+
 ### Amendment A2 (2026-10-20): pre-registered secondary readout at 20–39k
 
 **Why.** The primary window (40–59k) measures where a run ends up. Three arms have now

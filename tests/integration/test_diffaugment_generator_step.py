@@ -48,7 +48,7 @@ class _StubData:
         self.config.trained_pool = self.config.validation_pool = self.config.test_pool = []
 
 
-def _make_trainer(tmp_path, monkeypatch, augment):
+def _make_trainer(tmp_path, monkeypatch, augment, extra=None, gen_filters=(8,), disc_filters=(8,)):
     import copy
     import importlib
 
@@ -71,13 +71,14 @@ def _make_trainer(tmp_path, monkeypatch, augment):
             "grad_clip_norm": 0.0, "ema_decay": 0.0, "lr_decay": None,
             "fid_interval": 0, "grad_probe_interval": 0,
         })
+        data.update(extra or {})
         path = tmp_path / f"{architecture}_config.json"
         path.write_text(json.dumps(data))
         return build(str(path))
 
-    generator = Generator(cfg("generator", [8], 1))
+    generator = Generator(cfg("generator", list(gen_filters), 1))
     generator.model.build((None, 16))
-    discriminator = Discriminator(cfg("discriminator", [8], 1))
+    discriminator = Discriminator(cfg("discriminator", list(disc_filters), 1))
     discriminator.model.build((None, 1, RES, RES, 3))
     return trainer_module.Trainer(generator, discriminator)
 

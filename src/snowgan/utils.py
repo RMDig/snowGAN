@@ -149,6 +149,8 @@ def parse_args():
     # configure()'s int() cast, so a float here reached keras.Input(shape=(100.0,))
     # and crashed model build (UPGRADES #7).
     parser.add_argument('--latent_dim', type = int, default = None, help = 'Latent dimension size (Defaults to 100)')
+    parser.add_argument('--disc_head', type=str, default=None, choices=['linear', 'mlp'], help='Critic head. linear (default): position-specific linear readout of the final feature grid. mlp: 1x1 conv to 64 channels + 128-unit hidden layer, a nonlinear function of the whole grid (capacity arm K1). Changes the features tensor AvAI reads.')
+    parser.add_argument('--gen_residual_blocks', type=int, default=None, help='Zero-initialised residual conv blocks after each generator upsampling stage (capacity arm G2; default 0). Zero init means the network starts out computing the same function as without them.')
     parser.add_argument('--init_seed', type=int, default=None, help='Seed for weight init and training-time randomness only. The split and the in-training KID latents stay on --seed, so a different --init_seed is a same-split replicate (default: use --seed).')
     parser.add_argument('--seed', type = int, default = None, help = 'RNG seed for weight init, noise sampling and split derivation. Persisted to the config so a resume replays the same stream (defaults to 42).')
     parser.add_argument('--max_steps', type = int, default = None, help = 'Hard stop after N train steps (global_step). 0 = no cap. Use this to make a gated control run terminate at a defined point rather than relying on a manual kill.')
