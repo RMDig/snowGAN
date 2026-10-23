@@ -452,6 +452,44 @@ latents stay on `seed` 42, so E0b and E0 are scored on identical reals and laten
 4. **If E0b ≈ E0** (|Δ| < 0.02 in both windows), the arms really are worse, and the
    campaign proceeds to Tier B on the E0 reference.
 
+### E0b result (2026-10-23): E0 was a lucky reference. Every arm is a tie.
+
+- **E0b** (`cap_e0b`, `--init_seed 1042`, code 2fed2e2 run from a worktree, so its
+  run_start git_sha reads "unknown"; one restart): paired against E0, **20–39k
+  +0.003 ± 0.010** (lower at 10/20) and **40–59k +0.091 ± 0.014** (lower at 0/20).
+- 10k-window means: E0 0.380 / 0.352 / 0.332 / **0.266 / 0.239**; E0b 0.357 / 0.363
+  / 0.328 / **0.369 / 0.319**. The two runs agree until ~40k, then E0 drops sharply
+  and E0b does not. Best in-training: E0 0.226, E0b 0.270.
+- **Pre-registered rule 3 triggers (Δ > 0.04).** The reference is now the step-wise
+  mean of E0 and E0b. σ_run = 0.091 / √2 = **0.064** (1 degree of freedom: rough).
+  Bar = 2·sqrt(1.5·σ_run² + SE²) ≈ **0.16**; the 1.5 is because the reference is a
+  2-run mean.
+- **Re-reading against the E0/E0b mean** (Δ, then points lower out of 20):
+
+| arm | 20–39k | 40–59k | verdict |
+|---|---|---|---|
+| O1 critic LR 3× | **−0.082** (20/20) | **−0.044** (19/20) | tie; the only consistent direction |
+| O2 fresh critic batches | −0.041 (16/20) | +0.059 (2/20) | tie |
+| S1 shuffled stream | +0.017 (6/20) | −0.004 (12/20) | tie |
+| C1 DiffAugment | +0.022 (5/20) | +0.018 (5/20) | tie |
+| D1 drop site 0 | −0.011 (16/20) | +0.023 (5/20) | tie |
+| C1 at 60–79k vs the reference's 40–59k plateau | | −0.014 | tie (still improving: 0.291 → 0.278) |
+
+**What this means for the campaign.**
+- "Every arm is level with or worse than E0" was an artifact of E0's luck.
+- Run-to-run noise at a fixed split (σ ≈ 0.06 per late window) is larger than every
+  effect measured. A single-run arm can only detect effects of about 0.16. Two runs of
+  the identical recipe settled at 0.25 and 0.34, which looks as if some runs "click"
+  around 40k and others do not.
+- **Practical consequence:** training several seeds and keeping the best by KID is a
+  real lever (E0 best 0.226 vs E0b 0.270).
+- **Remaining budget (~3–4 GPU-days), proposed:** replicate O1, the only arm with a
+  consistent direction, to 3 runs (init_seed 1042, 2042) against a 3-run reference
+  (E0, E0b, E0c). With n = 3 per side the bar falls to about 0.10. **Tier B single
+  runs are postponed**: at a 0.16 bar they would likely add more ties.
+- **E0c** (`cap_e0c`, `--init_seed 2042`, commit e3b502d) was launched
+  2026-10-23. It is needed under any option.
+
 ### Tier B implementation (2026-10-22, branch `feat/tier-b`)
 
 Both switches are off by default, and the defaults build the historical models (tested).
