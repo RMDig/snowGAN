@@ -490,6 +490,29 @@ latents stay on `seed` 42, so E0b and E0 are scored on identical reals and laten
 - **E0c** (`cap_e0c`, `--init_seed 2042`, commit e3b502d) was launched
   2026-10-23. It is needed under any option.
 
+### O1 replication, 3 vs 3 (option A, approved 2026-10-23; pre-registered before O1b/O1c run)
+
+**Runs.** The reference is E0 (init 42), E0b (1042) and E0c (2042). The arm is O1 (init
+42, already run), **O1b** (`--disc_lr 0.00003 --init_seed 1042`) and **O1c** (`--disc_lr
+0.00003 --init_seed 2042`). All on seed 42 (same split, same KID latents), the same
+code lineage, 60k steps. O1b and O1c run back to back after E0c (`_launch/cap_o1bc.sh`).
+
+**Statistic.** For each run, its in-training EMA KID window mean over **40–59k
+(primary)** and **20–39k (secondary)**.
+- Δ = mean(O1 runs) − mean(reference runs).
+- Pooled SD across the 6 run-level means, s_p, with 4 degrees of freedom.
+- SE = s_p·√(2/3).
+- **Distinguishable iff |Δ| > 2.78 · SE**: the two-sided 95% t critical value for 4
+  df, deliberately stricter than "2 × SE" given how few runs there are.
+- **Also reported, not decisive:** the init-seed-paired differences (O1ᵢ − E0ᵢ) with
+  their mean and spread, and each run's best in-training KID.
+- **Adoption** (critic LR 3e-5 into the recipe) needs the primary to be
+  distinguishable *and* the same sign in all three pairs. A secondary-only win is
+  recorded as "faster, same endpoint".
+- **σ_run update:** the three reference runs give a 2-df estimate that replaces the
+  1-df value (0.064) for all earlier re-readings. Those are re-reported, not
+  re-decided.
+
 ### Tier B implementation (2026-10-22, branch `feat/tier-b`)
 
 Both switches are off by default, and the defaults build the historical models (tested).
