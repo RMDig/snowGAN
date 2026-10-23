@@ -683,19 +683,27 @@ class Trainer:
         seed = int(getattr(self.gen.config, "seed", 42)) + 2
         z = tf.random.Generator.from_seed(seed).normal([self.kid_samples, self.gen.config.latent_dim])
         features = []
-        # Chunked and featurised per chunk: 200 images at 1024^2 float32 are
-        # 2.5 GB if held at once, on top of a resident training graph.
-        for start in range(0, self.kid_samples, 4):
-            images = self.gen.model(z[start:start + 4], training=False)
-            features.append(inception_features(images, model=self._kid_inception))
-            del images
+        # With EMA on, score the shadow: it is the model the run is producing
+        # (previews and generator_ema.weights.h5 are drawn from it). try/finally
+        # so a failed eval cannot leave training running on EMA weights.
+        backup = self._apply_ema_to_generator()
+        try:
+            # Chunked and featurised per chunk: 200 images at 1024^2 float32 are
+            # 2.5 GB if held at once, on top of a resident training graph.
+            for start in range(0, self.kid_samples, 4):
+                images = self.gen.model(z[start:start + 4], training=False)
+                features.append(inception_features(images, model=self._kid_inception))
+                del images
+        finally:
+            self._restore_generator_weights(backup)
         return np.concatenate(features, axis=0)
 
     def _evaluate_kid(self):
         """Score the live generator; save best_kid/ on a new minimum.
 
-        Scores the primary weights (what generator.weights.h5 holds and what
-        kid_check.py scores by default), not the EMA shadow.
+        Scores the EMA shadow when ema_decay > 0 (re-score best_kid/ with
+        kid_check.py --weights_file generator_ema.weights.h5), else the primary
+        weights. The `weights` field of each record says which.
 
         The saved best is optimistically biased (winner's curse: the minimum
         of many noisy scores). Report it only after re-scoring best_kid/ with
@@ -733,6 +741,7 @@ class Trainer:
         # saturated) out-scored every checkpoint to 14k that visibly matched
         # the reals better and was more diverse.
         eligible = self.global_step >= self.kid_min_step
+        weights = "ema" if self.ema_weights is not None else "primary"
         improved = eligible and score["kid_mean"] < self.best_kid
         print(f"KID @ step {self.global_step}: {score['kid_mean']:.5f} +/- {score['kid_se']:.5f} "
               f"(best: {score['kid_mean'] if improved else self.best_kid:.5f}"
@@ -740,7 +749,8 @@ class Trainer:
         self.metrics.write_event("kid", global_step=int(self.global_step),
                                  critic_updates=int(getattr(self, "critic_updates", 0)),
                                  n_gen=int(self.kid_samples), n_real=int(len(self._kid_real_features)),
-                                 best=bool(improved), eligible=bool(eligible), **score)
+                                 best=bool(improved), eligible=bool(eligible), weights=weights,
+                                 **score)
         if improved:
             self.best_kid = score["kid_mean"]
             best_dir = self._best_kid_dir()
@@ -751,6 +761,9 @@ class Trainer:
             record = dict(score, global_step=int(self.global_step),
                           critic_updates=int(getattr(self, "critic_updates", 0)),
                           n_gen=int(self.kid_samples), n_real=int(len(self._kid_real_features)),
+                          weights=weights,
+                          weights_file=("generator_ema.weights.h5" if weights == "ema"
+                                        else "generator.weights.h5"),
                           note="Selected as the minimum of many noisy scores; re-score with "
                                "scripts/kid_check.py at a different --seed before reporting.")
             tmp = os.path.join(best_dir, self._KID_RECORD + ".tmp")
