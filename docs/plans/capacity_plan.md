@@ -513,6 +513,45 @@ code lineage, 60k steps. O1b and O1c run back to back after E0c (`_launch/cap_o1
   1-df value (0.064) for all earlier re-readings. Those are re-reported, not
   re-decided.
 
+### O1 replication result (2026-10-26): "faster, same endpoint"
+
+All runs on commit c3d0178 (code = e3b502d), seed-42 split, 60k steps, one RSS restart
+each.
+
+| window | O1 / O1b / O1c | E0 / E0b / E0c | Δ | 2.78·SE | t | verdict |
+|---|---|---|---|---|---|---|
+| **40–59k (primary)** | 0.2537 / 0.2865 / 0.3082 (0.2828) | 0.2525 / 0.3438 / 0.3596 (0.3186) | −0.036 | 0.103 | −0.97 | **tie** |
+| 20–39k (secondary) | 0.2613 / 0.2601 / 0.2858 (0.2691) | 0.3421 / 0.3454 / 0.3373 (0.3416) | **−0.073** | 0.024 | −8.3 | **distinguishable** |
+
+- Paired by init seed (O1ᵢ − E0ᵢ): 20–39k −0.081 / −0.085 / −0.052 (all three
+  better); 40–59k +0.001 / −0.057 / −0.052 (not unanimous).
+- **Pre-registered verdict:** the primary is a tie and the secondary distinguishable,
+  so **"faster, same endpoint"**. Critic LR 3e-5 is **not adopted as a quality
+  improvement** under the adoption rule.
+- **Descriptive, not decisive:** best in-training checkpoint per run, O1 **0.234 /
+  0.227 / 0.242** (at 25k, 30k, 37k) vs reference 0.226 / 0.270 / 0.303 (at 55k, 55k,
+  30k). O1's best is reached earlier and varies far less between runs.
+- **σ_run update:** run-level SD of the three reference runs at 40–59k = **0.058** (2
+  df). This confirms the 1-df estimate (0.064). The earlier re-readings (O2, S1, C1,
+  D1: all ties) stand.
+
+### Capacity campaign conclusions (2026-10-26)
+
+1. **The recipe's late-window KID is dominated by run-to-run luck.** Same-split runs
+   of the identical recipe settle between 0.25 and 0.36 (σ ≈ 0.06). No single-run
+   comparison in this or the increment campaign could detect effects below ~0.10–0.16.
+2. **Nothing tested raises the plateau beyond that noise:** critic LR, fresh critic
+   batches, a shuffled stream, DiffAugment (even at 80k), dropping site 0; earlier,
+   the anneal, λ_gp 20 and a 160k horizon.
+3. **Critic LR 3e-5 reliably reaches the plateau ~20k steps sooner** (20–39k: −0.073,
+   t = −8.3, 3/3 pairs). Its best checkpoints are consistently 0.227–0.242. That is a
+   compute and reliability gain, not a quality gain.
+4. **Practical recipe:** EMA 0.999 plus best-KID checkpointing (`--kid_min_step
+   20000`). Either train 2–3 seeds and keep the best, or use critic LR 3e-5 to
+   get a good checkpoint sooner and more reliably.
+5. **Not tested** (budget): Tier B architecture (K1, G2; code ready on `feat/tier-b`).
+   At σ ≈ 0.06, each would need ≥ 3 runs per side to be readable.
+
 ### Tier B implementation (2026-10-22, branch `feat/tier-b`)
 
 Both switches are off by default, and the defaults build the historical models (tested).
