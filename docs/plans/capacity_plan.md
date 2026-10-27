@@ -552,6 +552,49 @@ each.
 5. **Not tested** (budget): Tier B architecture (K1, G2; code ready on `feat/tier-b`).
    At σ ≈ 0.06, each would need ≥ 3 runs per side to be readable.
 
+### Tier B study, 3 runs per arm (pre-registered 2026-10-26, before any K1/G2 run)
+
+**Question:** does either architecture change move the plateau beyond run-to-run noise
+(σ ≈ 0.058)?
+- **K1** (`--disc_head mlp`): H1, cross-patch structure.
+- **G2** (`--gen_residual_blocks 1`): H2, generator depth.
+
+**Runs.** For each arm, 3 runs at init_seed 42 / 1042 / 2042, on the seed-42 split
+and the campaign base (`train_capacity_arm.sh`), 60k steps. **The reference is the
+existing E0 / E0b / E0c.** Same recipe, split, KID latents and init seeds; their code
+differs from main only by switches that default off (tested). So only 6 new runs are
+needed. K1's three run first, then G2's.
+
+**Test (identical to the O1 replication).**
+- Run-level in-training EMA KID window means over **40–59k (primary)** and **20–39k
+  (secondary)**.
+- Δ = mean(arm) − mean(reference). Pooled SD s_p across the 6 run means (4 df).
+  SE = s_p·√(2/3).
+- **Distinguishable iff |Δ| > 2.78·SE.**
+- **Adoption** needs the primary distinguishable *and* the same sign in all 3
+  init-seed pairs. A secondary-only win = "faster, same endpoint".
+- Each arm is judged on its own, with no correction across the two arms (each answers
+  a separate hypothesis). That is stated here, not chosen afterwards.
+
+**Plateau guard.** A bigger model may plateau later. If an arm's mean over its three
+runs at 50–59k is still more than 2 × 0.013 below its 40–49k mean, its runs are
+extended to 80k. Their 60–79k means are then compared to the reference's 40–59k
+plateau, with the same test and SE.
+
+**Reported for every run, never decisive:** step time, peak VRAM, ‖∇D‖ by 10k
+window, critic real > fake rate, best in-training checkpoint.
+
+**GPU smoke (2026-10-26, 300 steps each, no KID).** K1 **1.27 s/step**, G2 **1.56
+s/step** (base 1.18). Peak VRAM ~9.5 GB for both (16 GB card). No errors. Estimated
+cost: K1 3 × ~21 h, G2 3 × ~26 h, so **~6 GPU-days in total**. Queue:
+`_launch/cap_tierb.sh` runs cap_k1, cap_k1b, cap_k1c, then cap_g2, cap_g2b, cap_g2c.
+The G2 runs can be cancelled if K1 settles the question first.
+
+**Caveats recorded in advance.** K1 doubles the critic (7.3M → 14.7M params) and G2
+grows the generator by 60% (41.9M → 67.1M). A win is "this change, including its
+parameter cost", not "this mechanism". K1 changes the critic `features` tensor, so a
+K1 backbone needs a snowGradient transfer check before any release.
+
 ### Tier B implementation (2026-10-22, branch `feat/tier-b`)
 
 Both switches are off by default, and the defaults build the historical models (tested).
