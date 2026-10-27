@@ -319,6 +319,8 @@ class Trainer:
         self.kid_interval = int(getattr(self.gen.config, 'kid_interval', 0) or 0)
         self.kid_samples = int(getattr(self.gen.config, 'kid_samples', 200) or 200)
         self.kid_min_step = int(getattr(self.gen.config, 'kid_min_step', 0) or 0)
+        self.kid_antialias = bool(getattr(self.gen.config, 'kid_antialias', False))
+        self.fresh_critic_batches = bool(getattr(self.gen.config, 'fresh_critic_batches', False))
         self._kid_inception = None
         self._kid_real_features = None
         self.best_kid = self._load_best_kid()
@@ -410,7 +412,13 @@ class Trainer:
                 del tmp_model
                 print(f"EMA weights loaded from {ema_path}")
             except Exception as e:
-                print(f"Warning: could not load EMA weights: {e}. Using current generator weights.")
+                # Fail loudly. Silently restarting the shadow from the raw
+                # weights on a resume would erase the averaging the run's
+                # results depend on (capacity_plan §6), and nothing downstream
+                # would notice.
+                raise RuntimeError(
+                    f"EMA weights exist at {ema_path} but could not be loaded ({e}). "
+                    f"Refusing to continue with a reset EMA shadow.") from e
 
     def _update_ema(self):
         """Update EMA shadow weights with current generator weights."""
@@ -692,7 +700,8 @@ class Trainer:
             # 2.5 GB if held at once, on top of a resident training graph.
             for start in range(0, self.kid_samples, 4):
                 images = self.gen.model(z[start:start + 4], training=False)
-                features.append(inception_features(images, model=self._kid_inception))
+                features.append(inception_features(images, model=self._kid_inception,
+                                                   antialias=self.kid_antialias))
                 del images
         finally:
             self._restore_generator_weights(backup)
@@ -722,7 +731,8 @@ class Trainer:
                 self._kid_inception = InceptionV3(include_top=False, pooling="avg",
                                                   input_shape=(299, 299, 3))
                 self._kid_real_features, keys = real_features(
-                    self.gen.config, image_root, 0, self._kid_inception)
+                    self.gen.config, image_root, 0, self._kid_inception,
+                    antialias=self.kid_antialias)
                 self.metrics.write_event("kid_reals", global_step=int(self.global_step),
                                          images=len(keys), groups=len(set(keys)))
 
@@ -820,6 +830,7 @@ class Trainer:
             honor_splits=bool(getattr(self.gen.config, "honor_splits", True)),
             max_steps=int(self.max_steps),
             seed=int(getattr(self.gen.config, "seed", 42)),
+            init_seed=getattr(self.gen.config, "init_seed", None),
         )
 
         start_epoch = int(getattr(self.gen.config, "current_epoch", 0) or 0)
@@ -1054,7 +1065,25 @@ class Trainer:
         real_means: list = []
         fake_means: list = []
         real_scores = None
-        for _ in range(self._disc_steps):
+        for critic_step in range(self._disc_steps):
+            # Capacity campaign O2: a fresh real batch and fresh noise for every
+            # critic step after the first. Off by default, which keeps the
+            # historical stream (every critic step reuses one batch and one
+            # noise draw) bit-identical, RNG included.
+            if self.fresh_critic_batches and critic_step > 0:
+                want = int(batch_size)
+                fresh = self.dataset.next_batch(want)
+                # Manifest exhausted, or a short tail batch: wrap, as train()
+                # does. A short batch must not be used, because the fakes are
+                # generated at `want` and the gradient penalty interpolates
+                # real against fake element-wise (cap_o2 crashed on a
+                # short-vs-4 broadcast at step 250).
+                if fresh is None or len(fresh) != want:
+                    self.gen.config.train_ind = 0
+                    fresh = self.dataset.next_batch(want)
+                if fresh is not None and len(fresh) == want:
+                    images = tf.convert_to_tensor(fresh, dtype=images.dtype)
+                noise = tf.random.normal([tf.shape(images)[0], self.gen.config.latent_dim])
             # Generate synthetic images outside the tape — no need to track generator ops for disc training
             synthetic_images = tf.stop_gradient(self._generate_with_fade(noise, training=True))
 

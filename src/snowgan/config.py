@@ -160,6 +160,35 @@ config_template = {
             # statistics while looking visibly worse (Arm B: step 1k beat
             # every checkpoint to 14k). 0 = no floor.
             "kid_min_step": 0,
+            # Downsample with antialiasing before Inception. Off reproduces the
+            # pre-campaign KID; a 2-px checkerboard aliases into low-frequency
+            # energy without it (capacity_plan F6).
+            "kid_antialias": False,
+            # Capacity campaign O2: draw a fresh real batch and fresh noise for
+            # every critic step after the first. Off = the historical
+            # behaviour, where all critic steps of a train step reuse one batch.
+            "fresh_critic_batches": False,
+            # Capacity campaign D1: sites skipped by the training stream. They
+            # stay in trained_pool (the split is unchanged); they are just never
+            # served. Site 0 is a flagged pilot ("advised not to use in higher
+            # level models").
+            "exclude_sites": [],
+            # Serve the training stream in a fresh random order each pass.
+            # Off reproduces the historical stream, which reads the manifest in
+            # (site, column, core) order: 94% of 4-image batches are a single
+            # core and every pass sweeps the cores in a fixed cycle.
+            # Single-modality path only (batch(), not batch_merged()).
+            "shuffle_data": False,
+            # Resume state for shuffle_data: which pass's permutation is live.
+            "data_pass": 0,
+            # Seed for weight init and training-time randomness only (None =
+            # use seed). The split and in-training KID latents stay on seed.
+            "init_seed": None,
+            # Capacity campaign Tier B. disc_head "linear" (default, historical)
+            # or "mlp" (K1: nonlinear head). gen_residual_blocks: zero-init
+            # residual conv blocks per upsampling stage (G2; 0 = historical).
+            "disc_head": "linear",
+            "gen_residual_blocks": 0,
             # HF dataset commit SHA the run trained against, and the snowgan
             # version that wrote this sidecar. Both exist because reconstructing
             # "which manifest did this backbone see?" otherwise requires
@@ -255,6 +284,14 @@ class build:
         config_json.setdefault("kid_interval", 0)
         config_json.setdefault("kid_samples", 200)
         config_json.setdefault("kid_min_step", 0)
+        config_json.setdefault("kid_antialias", False)
+        config_json.setdefault("fresh_critic_batches", False)
+        config_json.setdefault("exclude_sites", [])
+        config_json.setdefault("shuffle_data", False)
+        config_json.setdefault("data_pass", 0)
+        config_json.setdefault("init_seed", None)
+        config_json.setdefault("disc_head", "linear")
+        config_json.setdefault("gen_residual_blocks", 0)
         config_json.setdefault("dataset_revision", None)
         config_json.setdefault("snowgan_version", None)
         # Infer the modality mode from the existing depth on legacy configs.
@@ -349,7 +386,7 @@ class build:
             config_json = config_template
         return config_json
 
-    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", gen_convs_per_resolution=2, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, mask_board=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0, clamp_gp_under_sn=False, grad_probe_interval=50, max_steps=0, honor_splits=True, image_root=None, critic_updates=0, dataset_revision=None, snowgan_version=None, snapshot_keep_every=10000, snapshot_keep_recent=10, kid_interval=0, kid_samples=200, kid_min_step=0, **unknown_fields):
+    def configure(self, save_dir, checkpoint, dataset, datatype, architecture, resolution, images, trained_pool, validation_pool, test_pool, model_history, n_samples, epochs, current_epoch, batch_size, training_steps, learning_rate, beta_1, beta_2, negative_slope, lambda_gp, latent_dim, convolution_depth, filter_counts, kernel_size, kernel_stride, batch_norm, final_activation, zero_padding, padding, optimizer, loss, train_ind, trained_data, rebuild, gen_norm=None, gen_upsampler="resize", gen_convs_per_resolution=2, fade=False, fade_steps=10000, fade_step=0, cleanup_milestone=1000, seen_profiles=None, channels=3, depth=1, spectral_norm=False, augment=False, mask_board=False, lr_decay=None, lr_min=1e-7, lr_decay_steps=0, ema_decay=0.0, fid_interval=0, multiscale_disc=False, grad_clip_norm=0.0, ada_target=0.0, adaptive_steps=False, seed=42, modality="magnified_profile", sample_epoch_interval=1, sample_batch_interval=0, max_rss_mb=0, clamp_gp_under_sn=False, grad_probe_interval=50, max_steps=0, honor_splits=True, image_root=None, critic_updates=0, dataset_revision=None, snowgan_version=None, snapshot_keep_every=10000, snapshot_keep_recent=10, kid_interval=0, kid_samples=200, kid_min_step=0, kid_antialias=False, fresh_critic_batches=False, exclude_sites=None, shuffle_data=False, data_pass=0, init_seed=None, disc_head="linear", gen_residual_blocks=0, **unknown_fields):
         # Forward compatibility. `configure` is called as `configure(**config_json)`,
         # so without this a config written by a NEWER snowgan raises TypeError on an
         # OLDER one — and the sidecars are a cross-repo contract: snowGradient pins
@@ -471,6 +508,14 @@ class build:
         self.kid_interval = int(kid_interval) if kid_interval else 0
         self.kid_samples = int(kid_samples) if kid_samples else 200
         self.kid_min_step = int(kid_min_step) if kid_min_step else 0
+        self.kid_antialias = bool(kid_antialias)
+        self.fresh_critic_batches = bool(fresh_critic_batches)
+        self.exclude_sites = sorted({int(s) for s in (exclude_sites or [])})
+        self.shuffle_data = bool(shuffle_data)
+        self.data_pass = int(data_pass) if data_pass else 0
+        self.init_seed = int(init_seed) if init_seed is not None else None
+        self.disc_head = str(disc_head) if disc_head else "linear"
+        self.gen_residual_blocks = int(gen_residual_blocks) if gen_residual_blocks else 0
         # Stamped with the running version, not the loaded one: this records who
         # last wrote the file, which is the question a schema mismatch asks.
         from snowgan import __version__ as _snowgan_version
@@ -554,6 +599,14 @@ class build:
             "kid_interval": self.kid_interval,
             "kid_samples": self.kid_samples,
             "kid_min_step": self.kid_min_step,
+            "kid_antialias": self.kid_antialias,
+            "fresh_critic_batches": self.fresh_critic_batches,
+            "exclude_sites": self.exclude_sites,
+            "shuffle_data": self.shuffle_data,
+            "data_pass": self.data_pass,
+            "init_seed": self.init_seed,
+            "disc_head": self.disc_head,
+            "gen_residual_blocks": self.gen_residual_blocks,
             "dataset_revision": self.dataset_revision,
             "snowgan_version": self.snowgan_version,
             "seed": self.seed,
@@ -720,6 +773,20 @@ def configure_generic(config, args):
         config.kid_samples = int(args.kid_samples)
     if getattr(args, "kid_min_step", None) is not None:
         config.kid_min_step = int(args.kid_min_step)
+    if getattr(args, "kid_antialias", None) is not None:
+        config.kid_antialias = args.kid_antialias
+    if getattr(args, "fresh_critic_batches", None) is not None:
+        config.fresh_critic_batches = args.fresh_critic_batches
+    if getattr(args, "exclude_sites", None) is not None:
+        config.exclude_sites = sorted({int(s) for s in args.exclude_sites})
+    if getattr(args, "shuffle_data", None) is not None:
+        config.shuffle_data = args.shuffle_data
+    if getattr(args, "init_seed", None) is not None:
+        config.init_seed = int(args.init_seed)
+    if getattr(args, "disc_head", None) is not None:
+        config.disc_head = args.disc_head
+    if getattr(args, "gen_residual_blocks", None) is not None:
+        config.gen_residual_blocks = int(args.gen_residual_blocks)
     if getattr(args, "image_root", None) is not None:
         config.image_root = args.image_root or None
     if getattr(args, "modality", None) is not None:

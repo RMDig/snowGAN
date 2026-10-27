@@ -315,6 +315,31 @@ class DataManager:
             return False
         return (meta.get("site"), meta.get("column"), meta.get("core")) in self.held_out_keys
 
+    def _is_excluded(self, meta):
+        """True when this row's site is in config.exclude_sites (training stream only)."""
+        excluded = getattr(self.config, "exclude_sites", None)
+        return bool(excluded) and meta.get("site") in set(excluded)
+
+    def _row(self, position):
+        """Manifest row served at stream `position` (= config.train_ind).
+
+        Without shuffle_data this is the identity: the stream reads the manifest
+        in order, which is grouped by (site, column, core) -- 36 contiguous runs
+        for the seed-42 training pool, so 94% of 4-image batches are a single
+        core and every pass sweeps the cores in a fixed cycle. With shuffle_data
+        the position maps through a permutation drawn from (seed, data_pass),
+        a fresh one per pass, reproducible on resume because data_pass is
+        persisted.
+        """
+        if not getattr(self.config, "shuffle_data", False):
+            return position
+        key = (len(self.manifest), int(getattr(self.config, "seed", 42)),
+               int(getattr(self.config, "data_pass", 0) or 0))
+        if getattr(self, "_order_key", None) != key:
+            self._order = np.random.default_rng([key[1], key[2]]).permutation(key[0])
+            self._order_key = key
+        return int(self._order[position])
+
     def _get_manifest_entry(self, index):
         if index < 0 or index >= len(self.manifest):
             return None
@@ -403,17 +428,25 @@ class DataManager:
         datatype = normalize_datatype(datatype)
 
         print(f"Collecting a batch...")
-        
+
+        # A new pass starts when the caller wrapped train_ind to 0 after this
+        # process reached the end of the manifest; with shuffle_data the next
+        # pass gets a fresh permutation.
+        if self.config.train_ind == 0 and getattr(self, "_reached_end", False):
+            self.config.data_pass = int(getattr(self.config, "data_pass", 0) or 0) + 1
+            self._reached_end = False
+
         while count < batch_size and self.config.train_ind < len(self.manifest):
-            meta = self._get_manifest_entry(self.config.train_ind)
+            row = self._row(self.config.train_ind)
+            meta = self._get_manifest_entry(row)
             if meta is None:
                 break
             sample_datatype = meta.get("datatype")
 
-            print(f"Checking sample at index {self.config.train_ind} - {sample_datatype} - {datatype}")
+            print(f"Checking sample at index {row} - {sample_datatype} - {datatype}")
 
-            if sample_datatype == datatype and not self._is_held_out(meta):
-                image = self.load_image(self.config.train_ind, meta)
+            if sample_datatype == datatype and not self._is_held_out(meta) and not self._is_excluded(meta):
+                image = self.load_image(row, meta)
                 if image is None:
                     self.config.train_ind += 1
                     continue
@@ -424,7 +457,7 @@ class DataManager:
                 scaled_image = tf.expand_dims(scaled_image, axis=0)
 
                 batch.append(scaled_image)
-                print(f"Image {self.config.train_ind} added")
+                print(f"Image {row} added")
 
                 # HF datasets accumulates PIL/decoded buffers in process RAM
                 # on repeated indexed access (huggingface/datasets #4883, #7180).
@@ -436,13 +469,16 @@ class DataManager:
                 count += 1
             self.config.train_ind += 1
 
+        if self.config.train_ind >= len(self.manifest):
+            self._reached_end = True
+
         if len(batch) > 0:
             return np.stack(batch)
-        
+
         else:
             print("All images have been assessed and no available images could be found")
             return None
-        
+
     def batch_merged(self, batch_size, config = None):
         """
         Prepare a batch of data from the dataset.
@@ -472,7 +508,7 @@ class DataManager:
             print(f"Checking sample at index {self.config.train_ind} - {sample_datatype}")
 
             # If we've found a core sample in a group we're allowed to train on
-            if sample_datatype == 0 and not self._is_held_out(meta):
+            if sample_datatype == 0 and not self._is_held_out(meta) and not self._is_excluded(meta):
 
                 # NB: no `self.dataset['train'][...]` here. Materializing an HF
                 # row decodes every column including the URL-backed `image`, so

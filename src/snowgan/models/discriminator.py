@@ -44,7 +44,27 @@ class Discriminator(keras.Model):
         # name="features": cross-repo contract with AvAI Phase 3 transfer
         # learning, which calls model.get_layer("features") on the loaded
         # discriminator. See docs/UPGRADES.md §3.
+        # Capacity campaign K1 (capacity_plan H1): a nonlinear head. The
+        # default linear head is a position-specific linear readout over the
+        # 32x32 grid of 63-px patch features: it can weigh *where* a cue is
+        # (e.g. vignette darkness) but cannot model interactions between
+        # patches (layout, geometry, placement). "mlp" adds a 1x1 conv down to
+        # 64 channels and a 128-unit hidden layer, so the score is a nonlinear
+        # function of the whole grid. It changes the `features` tensor that
+        # AvAI reads (32x32x64 instead of 32x32x1024), so a K1 critic is not a
+        # drop-in transfer backbone.
+        disc_head = getattr(self.config, "disc_head", "linear") or "linear"
+        if disc_head == "mlp":
+            squeeze = keras.layers.Conv3D(64, (1, 1, 1), strides=1, padding="same", name="head_squeeze")
+            x = keras.layers.SpectralNormalization(squeeze)(x) if use_sn else squeeze(x)
+            x = keras.layers.LeakyReLU(negative_slope=self.config.negative_slope)(x)
+        elif disc_head != "linear":
+            raise ValueError(f"disc_head must be 'linear' or 'mlp', got {disc_head!r}")
         x = keras.layers.Flatten(name="features")(x)
+        if disc_head == "mlp":
+            hidden = keras.layers.Dense(128, name="head_hidden")
+            x = keras.layers.SpectralNormalization(hidden)(x) if use_sn else hidden(x)
+            x = keras.layers.LeakyReLU(negative_slope=self.config.negative_slope)(x)
         # Pin the critic's scalar output head to float32 under any mixed
         # precision policy. Wasserstein scores are unbounded, so fp16 can
         # overflow during the WGAN-GP gradient penalty's interpolation pass

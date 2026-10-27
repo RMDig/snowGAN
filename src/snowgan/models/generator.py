@@ -83,6 +83,24 @@ class Generator(keras.Model):
                 x = PixelNorm()(x)
             return keras.layers.LeakyReLU(self.config.negative_slope)(x)
 
+        # Capacity campaign G2 (capacity_plan H2): zero-initialised residual
+        # conv blocks after each upsampling stage. The second conv of each
+        # block starts at exactly zero, so at step 0 the network computes the
+        # same function as without them; the extra depth is opt-in through
+        # training rather than a change to the starting point. Depth added
+        # without this (gen_convs_per_resolution 2, un-normalised) collapsed
+        # to a flat grey frame (the post-audit stack, b4e0677).
+        n_residual = int(getattr(self.config, "gen_residual_blocks", 0) or 0)
+
+        def residual_blocks(x, filters):
+            for _ in range(n_residual):
+                h = keras.layers.Conv3D(filters, ksize, strides=1, padding="same")(x)
+                h = keras.layers.LeakyReLU(self.config.negative_slope)(h)
+                h = keras.layers.Conv3D(filters, ksize, strides=1, padding="same",
+                                        kernel_initializer="zeros", bias_initializer="zeros")(h)
+                x = keras.layers.Add()([x, h])
+            return x
+
         def conv_block(x, filters):
             """Stride-1 conv + normalization + activation."""
             x = keras.layers.Conv3D(filters, ksize, strides=1, padding=self.config.padding)(x)
@@ -111,6 +129,7 @@ class Generator(keras.Model):
                 x = keras.layers.UpSampling3D(size=up_size)(x)
                 for _ in range(convs_per_res):
                     x = conv_block(x, filters)
+            x = residual_blocks(x, filters)
             feats.append(x)
 
         # toRGB does the final doubling (the "+1" in the

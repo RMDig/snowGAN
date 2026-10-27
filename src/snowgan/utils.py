@@ -9,6 +9,20 @@ from pathlib import Path
 from snowgan.config import build as configuration
 
 
+def training_seed(config) -> int:
+    """Seed for weight init and training-time randomness.
+
+    `config.seed` also fixes the train/validation/test split (derive_splits)
+    and the in-training KID latents (seed + 2), so changing it changes the
+    data a run trains and is scored on. `config.init_seed`, when set, replaces
+    it for the global RNGs only: a same-split replicate with independent
+    initialization and noise. That is what measuring run-to-run variance at a
+    fixed split needs (capacity_plan, E0b).
+    """
+    init_seed = getattr(config, "init_seed", None)
+    return int(init_seed) if init_seed is not None else int(config.seed)
+
+
 def set_seed(seed: int) -> None:
     """Pin RNG state across Python, NumPy, and TensorFlow for reproducibility.
 
@@ -135,6 +149,9 @@ def parse_args():
     # configure()'s int() cast, so a float here reached keras.Input(shape=(100.0,))
     # and crashed model build (UPGRADES #7).
     parser.add_argument('--latent_dim', type = int, default = None, help = 'Latent dimension size (Defaults to 100)')
+    parser.add_argument('--disc_head', type=str, default=None, choices=['linear', 'mlp'], help='Critic head. linear (default): position-specific linear readout of the final feature grid. mlp: 1x1 conv to 64 channels + 128-unit hidden layer, a nonlinear function of the whole grid (capacity arm K1). Changes the features tensor AvAI reads.')
+    parser.add_argument('--gen_residual_blocks', type=int, default=None, help='Zero-initialised residual conv blocks after each generator upsampling stage (capacity arm G2; default 0). Zero init means the network starts out computing the same function as without them.')
+    parser.add_argument('--init_seed', type=int, default=None, help='Seed for weight init and training-time randomness only. The split and the in-training KID latents stay on --seed, so a different --init_seed is a same-split replicate (default: use --seed).')
     parser.add_argument('--seed', type = int, default = None, help = 'RNG seed for weight init, noise sampling and split derivation. Persisted to the config so a resume replays the same stream (defaults to 42).')
     parser.add_argument('--max_steps', type = int, default = None, help = 'Hard stop after N train steps (global_step). 0 = no cap. Use this to make a gated control run terminate at a defined point rather than relying on a manual kill.')
     parser.add_argument('--cleanup_milestone', type = int, default = 1000, help = 'Frequency (in batches) to save checkpoints and cleanup older batches (Defaults to 1000)')
@@ -193,6 +210,10 @@ def parse_args():
     parser.add_argument('--snapshot_keep_recent', type=int, default=None, help='Also keep the newest N snapshots, i.e. the rolling 1k-spaced window that kid_check.py scores at end of run (default 10; 0 disables). Raise it if you need mid-run KID windows.')
     parser.add_argument('--kid_interval', type=int, default=None, help='Steps between in-training KID evaluations against the held-out pools; a new minimum is saved to best_kid/ (default 0 = off). Requires --image_root. Same reals and estimator as scripts/kid_check.py.')
     parser.add_argument('--kid_samples', type=int, default=None, help='Generated images per in-training KID evaluation (default 200, matching kid_check.py --n_gen).')
+    parser.add_argument('--kid_antialias', action=argparse.BooleanOptionalAction, default=None, help='Antialias the 1024->299 resize before Inception in in-training KID (default off = historical KID). Without it a 2-px checkerboard aliases into what Inception sees.')
+    parser.add_argument('--fresh_critic_batches', action=argparse.BooleanOptionalAction, default=None, help='Draw a fresh real batch and fresh noise for every critic step after the first (default off: all critic steps of a train step reuse one batch and one noise draw).')
+    parser.add_argument('--exclude_sites', type=int, nargs='*', default=None, help='Sites the training stream skips (they stay in trained_pool; the split is unchanged). E.g. --exclude_sites 0 drops the flagged site-0 pilot. Pass with no values to clear.')
+    parser.add_argument('--shuffle_data', action=argparse.BooleanOptionalAction, default=None, help='Serve the training stream in a fresh random order each pass (default off). Off reads the manifest in (site, column, core) order, so 94%% of 4-image batches are a single core and each pass sweeps the cores in a fixed cycle.')
     parser.add_argument('--kid_min_step', type=int, default=None, help='Global step before which KID is logged but cannot claim best_kid/ (default 0). Early checkpoints can win on Inception statistics while looking visibly worse.')
     parser.add_argument('--image_root', type=str, default=None, help='Local directory mirroring the dataset, keyed by the manifest file_path column (e.g. ~/rmdig-cache-512). The HF image column is URL-backed and costs ~2 s of HTTP per image per epoch, which makes the data pipeline ~97%% of a 1024px train step; a local root cuts that to ~0.007 s. Rows missing locally fall back to the remote column.')
     parser.add_argument('--honor_splits', action=argparse.BooleanOptionalAction, default=None, help='Exclude validation_pool / test_pool groups from the training stream. Default ON. Runs before 2026-09 trained on their own test_pool, which invalidates any downstream transfer probe; --no-honor_splits reproduces that old behavior.')
