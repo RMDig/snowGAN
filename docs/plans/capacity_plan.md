@@ -595,6 +595,26 @@ grows the generator by 60% (41.9M → 67.1M). A win is "this change, including i
 parameter cost", not "this mechanism". K1 changes the critic `features` tensor, so a
 K1 backbone needs a snowGradient transfer check before any release.
 
+### K1 result (2026-10-29): no effect. H1 is not supported.
+
+`cap_k1`, `cap_k1b`, `cap_k1c` (init 42 / 1042 / 2042), commit 9e59999, 60k steps, one
+RSS restart each, no KID failures.
+
+| window | K1 / K1b / K1c (mean) | E0 / E0b / E0c (mean) | Δ | 2.78·SE | t | verdict |
+|---|---|---|---|---|---|---|
+| **40–59k (primary)** | 0.3275 / 0.3235 / 0.3000 (0.3170) | 0.2525 / 0.3438 / 0.3596 (0.3186) | **−0.002** | 0.096 | −0.05 | **tie** |
+| 20–39k (secondary) | 0.3382 / 0.4139 / 0.3328 (0.3616) | 0.3421 / 0.3454 / 0.3373 (0.3416) | +0.020 | 0.073 | +0.76 | tie |
+
+- Pairs (K1ᵢ − E0ᵢ): 40–59k +0.075 / −0.020 / −0.060; 20–39k −0.004 / +0.069 / −0.005.
+- **Plateau guard not triggered:** arm mean 50–59k 0.321 vs 40–49k 0.313 (not improving).
+- Best in-training: 0.289 / 0.282 / 0.274, inside the reference's 0.226–0.303 range.
+- The critic stayed healthy (‖∇D‖ ~1.1–1.2, real > fake ~0.46): no escape and no
+  instability. It just does not produce a better generator.
+- **Reading:** letting the critic model cross-patch layout (with 2× critic params) does
+  not move the plateau. Together with Phase 0 (no layout-specific deficit, G/T ≈ 0.9),
+  **H1 is not supported.** G2 (H2, generator depth) started automatically at ~13:20 on
+  2026-10-29 and runs to ~Mon 2 Nov.
+
 ### Tier B implementation (2026-10-22, branch `feat/tier-b`)
 
 Both switches are off by default, and the defaults build the historical models (tested).
