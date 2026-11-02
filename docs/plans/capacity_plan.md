@@ -640,7 +640,7 @@ test said 1.56).
 
 ### Campaign close (2026-11-01)
 
-**Spent:** ~20 GPU-days over 2026-10-15 → 11-01. The approved 10–12 covered Phase 0
+**Spent:** ~16 GPU-days over 17 calendar days (2026-10-15 → 11-01, including ~1 day lost to failures and idle time). The approved 10–12 covered Phase 0
 through O1; the Tier B study (~6) was approved separately on 2026-10-26.
 
 **Answers.**
