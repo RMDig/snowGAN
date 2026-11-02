@@ -615,6 +615,60 @@ RSS restart each, no KID failures.
   **H1 is not supported.** G2 (H2, generator depth) started automatically at ~13:20 on
   2026-10-29 and runs to ~Mon 2 Nov.
 
+### G2 result (2026-11-01): worse. The primary misses the pre-registered bar by 0.001.
+
+`cap_g2`, `cap_g2b`, `cap_g2c` (init 42 / 1042 / 2042), commit 9e59999, 60k steps, at
+most one RSS restart each, no KID failures. Actual speed was ~1.66 s/step (the smoke
+test said 1.56).
+
+| window | G2 / G2b / G2c (mean) | E0 / E0b / E0c (mean) | Δ | 2.78·SE | t | verdict |
+|---|---|---|---|---|---|---|
+| **40–59k (primary)** | 0.5246 / 0.3841 / 0.5297 (0.4795) | 0.3186 | **+0.161** | 0.162 | +2.76 | tie by rule (t 2.76 < 2.78) |
+| 20–39k (secondary) | 0.4448 / 0.4601 / 0.4470 (0.4506) | 0.3416 | **+0.109** | 0.015 | +20.4 | **distinguishable, worse** |
+
+- Pairs (G2ᵢ − E0ᵢ): 40–59k **+0.272 / +0.040 / +0.170**; 20–39k +0.103 / +0.115 /
+  +0.110. All six are worse.
+- Best in-training: 0.358 / 0.311 / 0.376, all worse than the reference's 0.226–0.303.
+- **The critic is outmatched throughout:** real > fake 0.13–0.19, against ~0.46 for the
+  reference and K1. The deeper generator overpowers the already-losing critic (Phase 0).
+- Plateau guard not triggered (50–59k 0.483 vs 40–49k 0.476).
+- **Recorded verdict: G2 is worse.** The primary window misses the pre-registered bar
+  by 0.001 (t 2.76 vs 2.78), and that is stated as such. It is not called a tie in any
+  meaningful sense, because every pair, every best checkpoint and the secondary window
+  agree. Not adopted. **H2 (more generator depth) is not supported**; at this critic
+  strength, generator capacity hurts.
+
+### Campaign close (2026-11-01)
+
+**Spent:** ~20 GPU-days over 2026-10-15 → 11-01. The approved 10–12 covered Phase 0
+through O1; the Tier B study (~6) was approved separately on 2026-10-26.
+
+**Answers.**
+1. **The plateau's level is dominated by run-to-run luck.** Same-split runs of the
+   adopted recipe settle anywhere from 0.25 to 0.36 (σ_run ≈ 0.058, 3 runs). Single-run
+   comparisons, including the whole increment campaign and the first half of this one,
+   could not detect effects under ~0.10–0.16.
+2. **Nothing tested raises the plateau.**
+   - Optimization: critic LR 3× (O1), fresh critic batches (O2).
+   - Data: shuffled stream (S1), DiffAugment to 80k (C1), dropping site 0 (D1).
+   - Architecture: nonlinear critic head (K1, a tie), generator residual depth (G2,
+     worse).
+   - Earlier: anneal, λ_gp 20, a 160k horizon.
+3. **Critic LR 3e-5 reaches the plateau ~20k steps sooner** (20–39k −0.073, t −8.3,
+   3/3 pairs), with consistent best checkpoints (0.227–0.242). A compute/reliability
+   gain, not a quality gain.
+4. **The critic is the weak side** (Phase 0: it loses to the generator). Making the
+   generator bigger made things worse (G2). Making the critic faster made it win but
+   not help (O1). Making it more expressive changed nothing (K1).
+5. **Practical recipe:** EMA 0.999 plus best-KID (`--kid_min_step 20000`). Then either
+   pick the best of 2–3 seeds (re-scored at a fresh seed), or use critic LR 3e-5 for an
+   earlier, steadier best checkpoint.
+
+**Not tested (candidates for a future round, each needs ≥ 3 runs per side):** batch
+size (4 at 1024²; the review flagged gradient noise), G2 together with a stronger critic
+(G2 showed the critic overpowered), per-layer noise injection (G3), and more data. The
+plateau may simply be what ~2,000 images supports.
+
 ### Tier B implementation (2026-10-22, branch `feat/tier-b`)
 
 Both switches are off by default, and the defaults build the historical models (tested).

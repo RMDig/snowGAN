@@ -99,6 +99,22 @@ it is evidence the generator is bad, not that the critic is unconstrained.
 
 ## Log
 
+**Capacity campaign summary (2026-10-15 → 2026-11-01).** Full record:
+[plans/capacity_plan.md](plans/capacity_plan.md).
+- **The late-window KID of the adopted recipe (EMA 0.999) is mostly run-to-run luck.**
+  Three same-split runs settled at 0.25, 0.34 and 0.36 (σ ≈ 0.058). Single-run
+  comparisons, including every increment-campaign arm, could not detect effects below
+  ~0.10–0.16.
+- **Nothing tested moves the plateau beyond that noise:** critic LR 3×, fresh critic
+  batches, a shuffled stream, DiffAugment (to 80k), dropping site 0, a nonlinear critic
+  head (3-run tie) and generator residual depth (3 runs, worse).
+- **Critic LR 3e-5 reaches the plateau ~20k steps sooner** (3-run test, t −8.3).
+- **Practical:** EMA, then best-KID, then either the best of 2–3 seeds or critic LR
+  3e-5.
+- **Defects found and fixed:** the training stream was never shuffled (`--shuffle_data`,
+  which did not help); KID aliased fine texture (`--kid_antialias`); `kid_check` OOM at
+  n_gen 1000; a silent EMA reset on reload failure.
+
 Verdict key: ✅ trains/structure · ⚠️ partial · ❌ collapsed · ⏳ pending
 
 | # | Date | Base | Single change under test | Data / res | Scoreboard result | Verdict |
