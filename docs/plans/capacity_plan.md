@@ -552,6 +552,123 @@ each.
 5. **Not tested** (budget): Tier B architecture (K1, G2; code ready on `feat/tier-b`).
    At σ ≈ 0.06, each would need ≥ 3 runs per side to be readable.
 
+### Tier B study, 3 runs per arm (pre-registered 2026-10-26, before any K1/G2 run)
+
+**Question:** does either architecture change move the plateau beyond run-to-run noise
+(σ ≈ 0.058)?
+- **K1** (`--disc_head mlp`): H1, cross-patch structure.
+- **G2** (`--gen_residual_blocks 1`): H2, generator depth.
+
+**Runs.** For each arm, 3 runs at init_seed 42 / 1042 / 2042, on the seed-42 split
+and the campaign base (`train_capacity_arm.sh`), 60k steps. **The reference is the
+existing E0 / E0b / E0c.** Same recipe, split, KID latents and init seeds; their code
+differs from main only by switches that default off (tested). So only 6 new runs are
+needed. K1's three run first, then G2's.
+
+**Test (identical to the O1 replication).**
+- Run-level in-training EMA KID window means over **40–59k (primary)** and **20–39k
+  (secondary)**.
+- Δ = mean(arm) − mean(reference). Pooled SD s_p across the 6 run means (4 df).
+  SE = s_p·√(2/3).
+- **Distinguishable iff |Δ| > 2.78·SE.**
+- **Adoption** needs the primary distinguishable *and* the same sign in all 3
+  init-seed pairs. A secondary-only win = "faster, same endpoint".
+- Each arm is judged on its own, with no correction across the two arms (each answers
+  a separate hypothesis). That is stated here, not chosen afterwards.
+
+**Plateau guard.** A bigger model may plateau later. If an arm's mean over its three
+runs at 50–59k is still more than 2 × 0.013 below its 40–49k mean, its runs are
+extended to 80k. Their 60–79k means are then compared to the reference's 40–59k
+plateau, with the same test and SE.
+
+**Reported for every run, never decisive:** step time, peak VRAM, ‖∇D‖ by 10k
+window, critic real > fake rate, best in-training checkpoint.
+
+**GPU smoke (2026-10-26, 300 steps each, no KID).** K1 **1.27 s/step**, G2 **1.56
+s/step** (base 1.18). Peak VRAM ~9.5 GB for both (16 GB card). No errors. Estimated
+cost: K1 3 × ~21 h, G2 3 × ~26 h, so **~6 GPU-days in total**. Queue:
+`_launch/cap_tierb.sh` runs cap_k1, cap_k1b, cap_k1c, then cap_g2, cap_g2b, cap_g2c.
+The G2 runs can be cancelled if K1 settles the question first.
+
+**Caveats recorded in advance.** K1 doubles the critic (7.3M → 14.7M params) and G2
+grows the generator by 60% (41.9M → 67.1M). A win is "this change, including its
+parameter cost", not "this mechanism". K1 changes the critic `features` tensor, so a
+K1 backbone needs a snowGradient transfer check before any release.
+
+### K1 result (2026-10-29): no effect. H1 is not supported.
+
+`cap_k1`, `cap_k1b`, `cap_k1c` (init 42 / 1042 / 2042), commit 9e59999, 60k steps, one
+RSS restart each, no KID failures.
+
+| window | K1 / K1b / K1c (mean) | E0 / E0b / E0c (mean) | Δ | 2.78·SE | t | verdict |
+|---|---|---|---|---|---|---|
+| **40–59k (primary)** | 0.3275 / 0.3235 / 0.3000 (0.3170) | 0.2525 / 0.3438 / 0.3596 (0.3186) | **−0.002** | 0.096 | −0.05 | **tie** |
+| 20–39k (secondary) | 0.3382 / 0.4139 / 0.3328 (0.3616) | 0.3421 / 0.3454 / 0.3373 (0.3416) | +0.020 | 0.073 | +0.76 | tie |
+
+- Pairs (K1ᵢ − E0ᵢ): 40–59k +0.075 / −0.020 / −0.060; 20–39k −0.004 / +0.069 / −0.005.
+- **Plateau guard not triggered:** arm mean 50–59k 0.321 vs 40–49k 0.313 (not improving).
+- Best in-training: 0.289 / 0.282 / 0.274, inside the reference's 0.226–0.303 range.
+- The critic stayed healthy (‖∇D‖ ~1.1–1.2, real > fake ~0.46): no escape and no
+  instability. It just does not produce a better generator.
+- **Reading:** letting the critic model cross-patch layout (with 2× critic params) does
+  not move the plateau. Together with Phase 0 (no layout-specific deficit, G/T ≈ 0.9),
+  **H1 is not supported.** G2 (H2, generator depth) started automatically at ~13:20 on
+  2026-10-29 and runs to ~Mon 2 Nov.
+
+### G2 result (2026-11-01): worse. The primary misses the pre-registered bar by 0.001.
+
+`cap_g2`, `cap_g2b`, `cap_g2c` (init 42 / 1042 / 2042), commit 9e59999, 60k steps, at
+most one RSS restart each, no KID failures. Actual speed was ~1.66 s/step (the smoke
+test said 1.56).
+
+| window | G2 / G2b / G2c (mean) | E0 / E0b / E0c (mean) | Δ | 2.78·SE | t | verdict |
+|---|---|---|---|---|---|---|
+| **40–59k (primary)** | 0.5246 / 0.3841 / 0.5297 (0.4795) | 0.3186 | **+0.161** | 0.162 | +2.76 | tie by rule (t 2.76 < 2.78) |
+| 20–39k (secondary) | 0.4448 / 0.4601 / 0.4470 (0.4506) | 0.3416 | **+0.109** | 0.015 | +20.4 | **distinguishable, worse** |
+
+- Pairs (G2ᵢ − E0ᵢ): 40–59k **+0.272 / +0.040 / +0.170**; 20–39k +0.103 / +0.115 /
+  +0.110. All six are worse.
+- Best in-training: 0.358 / 0.311 / 0.376, all worse than the reference's 0.226–0.303.
+- **The critic is outmatched throughout:** real > fake 0.13–0.19, against ~0.46 for the
+  reference and K1. The deeper generator overpowers the already-losing critic (Phase 0).
+- Plateau guard not triggered (50–59k 0.483 vs 40–49k 0.476).
+- **Recorded verdict: G2 is worse.** The primary window misses the pre-registered bar
+  by 0.001 (t 2.76 vs 2.78), and that is stated as such. It is not called a tie in any
+  meaningful sense, because every pair, every best checkpoint and the secondary window
+  agree. Not adopted. **H2 (more generator depth) is not supported**; at this critic
+  strength, generator capacity hurts.
+
+### Campaign close (2026-11-01)
+
+**Spent:** ~20 GPU-days over 2026-10-15 → 11-01. The approved 10–12 covered Phase 0
+through O1; the Tier B study (~6) was approved separately on 2026-10-26.
+
+**Answers.**
+1. **The plateau's level is dominated by run-to-run luck.** Same-split runs of the
+   adopted recipe settle anywhere from 0.25 to 0.36 (σ_run ≈ 0.058, 3 runs). Single-run
+   comparisons, including the whole increment campaign and the first half of this one,
+   could not detect effects under ~0.10–0.16.
+2. **Nothing tested raises the plateau.**
+   - Optimization: critic LR 3× (O1), fresh critic batches (O2).
+   - Data: shuffled stream (S1), DiffAugment to 80k (C1), dropping site 0 (D1).
+   - Architecture: nonlinear critic head (K1, a tie), generator residual depth (G2,
+     worse).
+   - Earlier: anneal, λ_gp 20, a 160k horizon.
+3. **Critic LR 3e-5 reaches the plateau ~20k steps sooner** (20–39k −0.073, t −8.3,
+   3/3 pairs), with consistent best checkpoints (0.227–0.242). A compute/reliability
+   gain, not a quality gain.
+4. **The critic is the weak side** (Phase 0: it loses to the generator). Making the
+   generator bigger made things worse (G2). Making the critic faster made it win but
+   not help (O1). Making it more expressive changed nothing (K1).
+5. **Practical recipe:** EMA 0.999 plus best-KID (`--kid_min_step 20000`). Then either
+   pick the best of 2–3 seeds (re-scored at a fresh seed), or use critic LR 3e-5 for an
+   earlier, steadier best checkpoint.
+
+**Not tested (candidates for a future round, each needs ≥ 3 runs per side):** batch
+size (4 at 1024²; the review flagged gradient noise), G2 together with a stronger critic
+(G2 showed the critic overpowered), per-layer noise injection (G3), and more data. The
+plateau may simply be what ~2,000 images supports.
+
 ### Tier B implementation (2026-10-22, branch `feat/tier-b`)
 
 Both switches are off by default, and the defaults build the historical models (tested).
