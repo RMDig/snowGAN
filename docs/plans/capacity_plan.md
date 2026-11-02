@@ -669,6 +669,36 @@ size (4 at 1024²; the review flagged gradient noise), G2 together with a strong
 (G2 showed the critic overpowered), per-layer noise injection (G3), and more data. The
 plateau may simply be what ~2,000 images supports.
 
+### Downstream verdict (2026-11-02): for features, snowGAN is off the critical path
+
+Denny's stated goal for snowGAN is **critic features for snowGradient's transfer
+learning**. This campaign optimized generator KID instead, which nothing links to
+feature quality.
+
+snowGradient ran a pre-registered frozen-backbone comparison (snowGradient 7ebbc62
+plan, 5eba58a results, `docs/plans/BACKBONE_COMPARISON_PLAN.md`). It used
+leave-one-site-out over sites 3–6 and a label-efficient modality probe; the
+primary score is AUC over k = 1–10 images per site-class.
+
+| arm | AUC | core-depth control (skill) |
+|---|---|---|
+| ConvNeXtTiny (ImageNet, frozen) | **1.000** | **+0.315** |
+| ResNet50V2 (ImageNet, frozen) | 0.988 | +0.228 (positive at all 4 sites) |
+| random-init critic (3 seeds) | 0.950 | — |
+| **snowGAN v0.1.0 critic** | **0.755** (flat in k; 0.868 vs 0.696 across image pools) | **−0.049** |
+
+- The ImageNet advantage survives masking the blue board.
+- This is the first time any features have read depth from these photos.
+
+**Consequences**
+- **General pretrained backbones replace the GAN critic as the feature source** for
+  snowGradient. That is a recommendation for Denny; adoption is his call.
+- **No further GAN work is justified on feature grounds.** The generators stay
+  useful for images.
+- **`release_candidates/magnified_profile_rc1` is an image candidate only.** It
+  trained on sites 3–6, so it cannot be used in snowGradient's
+  leave-one-site-out protocol in any case.
+
 ### Tier B implementation (2026-10-22, branch `feat/tier-b`)
 
 Both switches are off by default, and the defaults build the historical models (tested).
